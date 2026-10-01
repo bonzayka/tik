@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import yt_dlp
 
+# Automatically make FFmpeg available in PATH without requiring sudo/root access
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except ImportError:
+    pass
+
 from config import (
     DOWNLOADS_DIR,
     SUPPORTED_QUALITIES,
@@ -289,7 +296,12 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        raise RuntimeError("На сервере не установлен FFmpeg! Установите его командой:\nsudo apt update && sudo apt install -y ffmpeg")
+        try:
+            import static_ffmpeg
+            static_ffmpeg.add_paths()
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception:
+            raise RuntimeError("FFmpeg не найден! Для работы без прав root выполните: pip install static-ffmpeg")
 
     if proc.returncode != 0:
         logger.error(f"FFmpeg error: {proc.stderr}")

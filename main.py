@@ -31,6 +31,25 @@ logging.basicConfig(
 
 logger = logging.getLogger("bot")
 
+def init_ffmpeg():
+    """Initializes FFmpeg in PATH without needing root/sudo permissions."""
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+        logger.info("FFmpeg initialized via static-ffmpeg")
+    except ImportError:
+        import shutil
+        if not shutil.which("ffmpeg"):
+            logger.warning("FFmpeg not found in PATH! Attempting automatic installation via pip...")
+            try:
+                import subprocess
+                subprocess.run([sys.executable, "-m", "pip", "install", "static-ffmpeg>=2.5"], check=True)
+                import static_ffmpeg
+                static_ffmpeg.add_paths()
+                logger.info("FFmpeg installed and initialized successfully")
+            except Exception as e:
+                logger.error(f"Could not auto-install static-ffmpeg: {e}. Run: pip install static-ffmpeg")
+
 async def periodic_cleanup():
     """Periodically cleans up expired tasks and orphaned files."""
     while True:
@@ -52,6 +71,8 @@ async def periodic_cleanup():
             logger.warning(f"Error during periodic cleanup: {e}")
 
 async def main():
+    init_ffmpeg()
+
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("BOT_TOKEN is not set. Please set it in .env file.")
         sys.exit(1)
