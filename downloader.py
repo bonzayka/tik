@@ -19,68 +19,47 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-_cached_browser: Optional[str] = None
+def is_youtube_url(url: str) -> bool:
+    """Checks if the URL belongs to YouTube or YouTube Music."""
+    u = url.lower()
+    return "youtube.com" in u or "youtu.be" in u
 
-def detect_browser_cookies() -> str:
-    """Attempts to find an available browser with readable YouTube cookies."""
-    global _cached_browser
-    if _cached_browser is not None:
-        return _cached_browser
-
-    if COOKIES_FROM_BROWSER:
-        _cached_browser = COOKIES_FROM_BROWSER
-        return COOKIES_FROM_BROWSER
-
-    # Try supported browsers on Windows/Linux
-    for b in ['firefox', 'chrome', 'edge', 'brave', 'opera']:
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'cookiesfrombrowser': (b,),
-                'extract_flat': True
-            }
-            with yt_dlp.YoutubeDL(ydl_opts):
-                pass
-            _cached_browser = b
-            logger.info(f"Auto-detected working cookies from browser: {b}")
-            return b
-        except Exception:
-            continue
-
-    _cached_browser = ""
-    return ""
-
-def get_base_ydl_opts() -> Dict[str, Any]:
-    """Generates standard yt-dlp options with anti-bot bypass and cookie integration."""
+def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[str, Any]:
+    """Generates optimal yt-dlp options tailored to the specific platform."""
     opts: Dict[str, Any] = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'js_runtimes': {'node': {}},
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'web']
-            }
-        },
     }
 
-    # 1. Check for cookies file
-    cookie_path = BASE_DIR / COOKIES_FILE
-    if cookie_path.exists() and cookie_path.stat().st_size > 0:
-        opts['cookiefile'] = str(cookie_path)
-    else:
-        # 2. Try browser cookies
-        browser = detect_browser_cookies()
-        if browser:
-            opts['cookiesfrombrowser'] = (browser,)
+    # Only apply YouTube specific configurations
+    if is_youtube_url(url):
+        # 1. Use mobile clients by default to prevent "Sign in to confirm you're not a bot"
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        }
+
+        # 2. Check if cookies.txt is provided on the server
+        cookie_path = BASE_DIR / COOKIES_FILE
+        if cookie_path.exists() and cookie_path.stat().st_size > 0:
+            opts['cookiefile'] = str(cookie_path)
+            opts['extractor_args']['youtube']['player_client'] = ['web', 'android', 'ios']
+        elif COOKIES_FROM_BROWSER:
+            # Only use browser cookies if explicitly requested in .env
+            opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
+
+    if custom_format:
+        opts['format'] = custom_format
 
     return opts
 
 def _extract_info_sync(url: str) -> Dict[str, Any]:
     """Synchronous info extraction with yt-dlp and fallback logic."""
     ydl_opts = {
-        **get_base_ydl_opts(),
+        **get_ydl_opts_for_url(url),
         'extract_flat': False,
     }
     try:
@@ -88,9 +67,9 @@ def _extract_info_sync(url: str) -> Dict[str, Any]:
             return ydl.extract_info(url, download=False)
     except Exception as e:
         err_str = str(e)
-        # If blocked by YouTube bot detection, retry with fallback android client
-        if "Sign in to confirm you’re not a bot" in err_str or "cookies" in err_str.lower():
-            logger.warning("Sign-in required detected, attempting fallback with android player client...")
+        # If blocked by YouTube bot detection, retry with android client
+        if is_youtube_url(url) and ("Sign in to confirm you’re not a bot" in err_str or "cookies" in err_str.lower()):
+            logger.warning("Sign-in requirement encountered, retrying with android client...")
             fallback_opts = {
                 'quiet': True,
                 'no_warnings': True,
@@ -136,15 +115,12 @@ async def get_video_info(url: str) -> Dict[str, Any]:
         resolutions: List[int] = []
         if 'youtube' in extractor:
             for q in SUPPORTED_QUALITIES:
-                # If quality is available or lower than the max available height
                 if any(h >= q for h in available_heights):
                     resolutions.append(q)
-            # If none matched, take highest available <= 1080
             if not resolutions and available_heights:
                 best_h = min(max(available_heights), 1080)
                 resolutions.append(best_h)
         else:
-            # For TikTok and other single-format platforms
             resolutions = []
             
         return {
@@ -168,7 +144,6 @@ async def get_video_info(url: str) -> Dict[str, Any]:
 def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None) -> Dict[str, Any]:
     """Synchronous video download."""
     if height:
-        # Prefer mp4 video and m4a audio, merge with ffmpeg
         format_selector = (
             f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/"
             f"bv*[height<={height}]+ba/"
@@ -176,12 +151,11 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
             f"best"
         )
     else:
-        # Best available (e.g. TikTok)
         format_selector = "bv*+ba/best"
 
     out_template = str(task_dir / "video_%(id)s.%(ext)s")
     ydl_opts = {
-        **get_base_ydl_opts(),
+        **get_ydl_opts_for_url(url),
         'format': format_selector,
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
@@ -195,7 +169,6 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
     # Find downloaded file
     mp4_files = list(task_dir.glob("*.mp4"))
     if not mp4_files:
-        # Fallback to any video file
         video_files = [f for f in task_dir.glob("*") if f.is_file() and not f.name.endswith('.part')]
         if not video_files:
             raise FileNotFoundError("Downloaded video file not found")
@@ -234,7 +207,7 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     """Synchronous audio download as MP3."""
     out_template = str(task_dir / "audio_%(id)s.%(ext)s")
     ydl_opts = {
-        **get_base_ydl_opts(),
+        **get_ydl_opts_for_url(url),
         'format': 'bestaudio/best',
         'outtmpl': out_template,
         'postprocessors': [{
@@ -280,10 +253,9 @@ async def download_audio(url: str) -> Tuple[Dict[str, Any], Path]:
 
 def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     """Synchronous voice message download (OGG Opus format for Telegram)."""
-    # 1. First download best audio
     raw_template = str(task_dir / "raw_audio_%(id)s.%(ext)s")
     ydl_opts = {
-        **get_base_ydl_opts(),
+        **get_ydl_opts_for_url(url),
         'format': 'bestaudio/best',
         'outtmpl': raw_template,
     }
@@ -300,7 +272,7 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     raw_file = raw_files[0]
     voice_file = task_dir / "voice_message.ogg"
 
-    # 2. Convert to Telegram voice message spec with ffmpeg:
+    # Convert to Telegram voice message spec with ffmpeg:
     # Codec: libopus, Sample rate: 48000, Channels: 1 (mono), Bitrate: 64k
     cmd = [
         'ffmpeg',
@@ -325,7 +297,6 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     filesize = voice_file.stat().st_size
     duration = info.get('duration', 0)
 
-    # Clean up raw file
     try:
         raw_file.unlink()
     except Exception:
