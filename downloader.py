@@ -35,10 +35,10 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
 
     # Only apply YouTube specific configurations
     if is_youtube_url(url):
-        # 1. Use mobile clients by default to prevent "Sign in to confirm you're not a bot"
+        # 1. Use visionos and android clients to completely bypass "Sign in to confirm you're not a bot"
         opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['android', 'ios']
+                'player_client': ['visionos', 'android', 'android_vr']
             }
         }
 
@@ -77,7 +77,7 @@ def _extract_info_sync(url: str) -> Dict[str, Any]:
                 'js_runtimes': {'node': {}},
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android']
+                        'player_client': ['android', 'android_vr']
                     }
                 },
                 'extract_flat': False
