@@ -6,7 +6,8 @@ from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
 
-from config import MAX_FILE_SIZE_BYTES
+from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, HAS_MTPROTO
+from mtproto_uploader import uploader as mtproto_uploader
 from downloader import (
     get_video_info,
     download_video,
@@ -208,18 +209,17 @@ async def handle_download_callback(callback: CallbackQuery):
             width = res.get("width")
             video_height = res.get("height")
 
+            STANDARD_LIMIT = 50 * 1024 * 1024
+
             # Check Telegram limit
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
                     f"⚠️ <b>Файл слишком большой для отправки через Telegram!</b>\n\n"
-                    f"Размер файла: <code>{format_size(filesize)}</code> (лимит бота — 50 МБ).\n\n"
+                    f"Размер файла: <code>{format_size(filesize)}</code> (лимит бота — {MAX_FILE_SIZE_MB} МБ).\n\n"
                     f"💡 <i>Попробуйте выбрать качество ниже (например 720p или 480p), либо скачайте только аудио/ГС.</i>",
                     parse_mode="HTML"
                 )
                 return
-
-            await progress_msg.edit_text("📤 <i>Отправляю видео в Telegram...</i>", parse_mode="HTML")
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
             video_caption = (
                 f"🎬 <b>{html.escape(title)}</b>\n\n"
@@ -227,16 +227,43 @@ async def handle_download_callback(callback: CallbackQuery):
                 f"⏱ {format_duration(video_duration)} | 📦 {format_size(filesize)}"
             )
 
-            await callback.message.reply_video(
-                video=FSInputFile(filepath),
-                caption=video_caption,
-                duration=int(video_duration) if video_duration else None,
-                width=width if width else None,
-                height=video_height if video_height else None,
-                supports_streaming=True,
-                parse_mode="HTML"
-            )
-            await progress_msg.delete()
+            if filesize > STANDARD_LIMIT:
+                if mtproto_uploader.is_available:
+                    await progress_msg.edit_text(
+                        f"📤 <i>Загружаю большой файл ({format_size(filesize)}) через MTProto (до 2 ГБ)...</i>\n"
+                        f"<i>Это может занять немного больше времени.</i>",
+                        parse_mode="HTML"
+                    )
+                    await mtproto_uploader.send_video(
+                        chat_id=chat_id,
+                        filepath=filepath,
+                        caption=video_caption,
+                        duration=int(video_duration) if video_duration else 0,
+                        width=width if width else 0,
+                        height=video_height if video_height else 0
+                    )
+                    await progress_msg.delete()
+                else:
+                    await progress_msg.edit_text(
+                        f"⚠️ <b>Файл превышает 50 МБ ({format_size(filesize)}).</b>\n\n"
+                        f"Для загрузки файлов до 2 ГБ проверьте настройки API_ID и API_HASH.",
+                        parse_mode="HTML"
+                    )
+                    return
+            else:
+                await progress_msg.edit_text("📤 <i>Отправляю видео в Telegram...</i>", parse_mode="HTML")
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+
+                await callback.message.reply_video(
+                    video=FSInputFile(filepath),
+                    caption=video_caption,
+                    duration=int(video_duration) if video_duration else None,
+                    width=width if width else None,
+                    height=video_height if video_height else None,
+                    supports_streaming=True,
+                    parse_mode="HTML"
+                )
+                await progress_msg.delete()
 
         elif action_type == "audio":
             # Audio download
@@ -253,24 +280,47 @@ async def handle_download_callback(callback: CallbackQuery):
 
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
-                    f"⚠️ <b>Аудиофайл превышает 50 МБ ({format_size(filesize)}).</b>\n"
-                    f"Telegram не позволяет ботам отправлять файлы больше 50 МБ.",
+                    f"⚠️ <b>Аудиофайл превышает {MAX_FILE_SIZE_MB} МБ ({format_size(filesize)}).</b>",
                     parse_mode="HTML"
                 )
                 return
 
-            await progress_msg.edit_text("📤 <i>Отправляю аудиозапись...</i>", parse_mode="HTML")
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+            audio_caption = f"🎵 <b>{html.escape(title)}</b>\n👤 {html.escape(uploader)}"
 
-            await callback.message.reply_audio(
-                audio=FSInputFile(filepath),
-                title=title,
-                performer=uploader,
-                duration=int(audio_duration) if audio_duration else None,
-                caption=f"🎵 <b>{html.escape(title)}</b>\n👤 {html.escape(uploader)}",
-                parse_mode="HTML"
-            )
-            await progress_msg.delete()
+            if filesize > STANDARD_LIMIT:
+                if mtproto_uploader.is_available:
+                    await progress_msg.edit_text(
+                        f"📤 <i>Загружаю аудио ({format_size(filesize)}) через MTProto...</i>",
+                        parse_mode="HTML"
+                    )
+                    await mtproto_uploader.send_audio(
+                        chat_id=chat_id,
+                        filepath=filepath,
+                        caption=audio_caption,
+                        title=title,
+                        performer=uploader,
+                        duration=int(audio_duration) if audio_duration else 0
+                    )
+                    await progress_msg.delete()
+                else:
+                    await progress_msg.edit_text(
+                        f"⚠️ <b>Аудиофайл превышает 50 МБ ({format_size(filesize)}).</b>",
+                        parse_mode="HTML"
+                    )
+                    return
+            else:
+                await progress_msg.edit_text("📤 <i>Отправляю аудиозапись...</i>", parse_mode="HTML")
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+
+                await callback.message.reply_audio(
+                    audio=FSInputFile(filepath),
+                    title=title,
+                    performer=uploader,
+                    duration=int(audio_duration) if audio_duration else None,
+                    caption=audio_caption,
+                    parse_mode="HTML"
+                )
+                await progress_msg.delete()
 
         elif action_type == "voice":
             # Voice note conversion (OGG Opus)
@@ -287,21 +337,44 @@ async def handle_download_callback(callback: CallbackQuery):
 
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
-                    f"⚠️ <b>Голосовое сообщение превышает 50 МБ ({format_size(filesize)}).</b>",
+                    f"⚠️ <b>Голосовое сообщение превышает {MAX_FILE_SIZE_MB} МБ ({format_size(filesize)}).</b>",
                     parse_mode="HTML"
                 )
                 return
 
-            await progress_msg.edit_text("📤 <i>Отправляю голосовое сообщение...</i>", parse_mode="HTML")
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+            voice_caption = f"🎙 <b>{html.escape(title)}</b>"
 
-            await callback.message.reply_voice(
-                voice=FSInputFile(filepath),
-                duration=int(voice_duration) if voice_duration else None,
-                caption=f"🎙 <b>{html.escape(title)}</b>",
-                parse_mode="HTML"
-            )
-            await progress_msg.delete()
+            if filesize > STANDARD_LIMIT:
+                if mtproto_uploader.is_available:
+                    await progress_msg.edit_text(
+                        f"📤 <i>Загружаю голосовое ({format_size(filesize)}) через MTProto...</i>",
+                        parse_mode="HTML"
+                    )
+                    await mtproto_uploader.send_voice(
+                        chat_id=chat_id,
+                        filepath=filepath,
+                        caption=voice_caption,
+                        duration=int(voice_duration) if voice_duration else 0
+                    )
+                    await progress_msg.delete()
+                else:
+                    await progress_msg.edit_text(
+                        f"⚠️ <b>Голосовое сообщение превышает 50 МБ ({format_size(filesize)}).</b>",
+                        parse_mode="HTML"
+                    )
+                    return
+            else:
+                await progress_msg.edit_text("📤 <i>Отправляю голосовое сообщение...</i>", parse_mode="HTML")
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+
+                await callback.message.reply_voice(
+                    voice=FSInputFile(filepath),
+                    duration=int(voice_duration) if voice_duration else None,
+                    caption=voice_caption,
+                    parse_mode="HTML"
+                )
+                await progress_msg.delete()
+
 
     except Exception as e:
         logger.error(f"Error processing download callback: {e}", exc_info=True)

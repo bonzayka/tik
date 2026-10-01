@@ -13,9 +13,16 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOADS_DIR = BASE_DIR / os.getenv("DOWNLOAD_DIR", "downloads")
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Telegram MTProto Credentials for large file uploads (up to 2GB)
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+HAS_MTPROTO = bool(API_ID and API_HASH)
+
 # Limits
-# Telegram Bot API standard upload limit is 50MB (52,428,800 bytes)
-MAX_FILE_SIZE_BYTES = int(os.getenv("MAX_FILE_SIZE_MB", "50")) * 1024 * 1024
+# Standard Bot API limit is 50MB. With MTProto credentials (API_ID/API_HASH) it is 2000MB (2GB).
+DEFAULT_MAX_MB = "2000" if HAS_MTPROTO else "50"
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", DEFAULT_MAX_MB))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Quality options to display for YouTube
 SUPPORTED_QUALITIES = [1080, 720, 480, 360]

@@ -15,9 +15,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, DOWNLOADS_DIR
+from config import BOT_TOKEN, DOWNLOADS_DIR, HAS_MTPROTO, MAX_FILE_SIZE_MB
 from handlers import router
 from task_manager import task_manager
+from mtproto_uploader import uploader
 
 # Configure logging
 logging.basicConfig(
@@ -68,10 +69,14 @@ async def main():
     cleanup_task = asyncio.create_task(periodic_cleanup())
 
     try:
+        # Start MTProto uploader if configured
+        await uploader.start()
+
         me = await bot.get_me()
         logger.info(f"Bot started successfully: @{me.username} ({me.full_name}) [ID: {me.id}]")
         print("\n" + "="*50)
         print(f"🚀 Бот @{me.username} запущен и готов к работе!")
+        print(f"📦 Максимальный размер загрузки: {MAX_FILE_SIZE_MB} МБ {'(MTProto 2GB активен)' if HAS_MTPROTO else '(50MB стандарт)'}")
         print("Отправьте ему ссылку на видео из YouTube или TikTok.")
         print("Нажмите Ctrl+C в терминале для остановки.")
         print("="*50 + "\n")
@@ -83,6 +88,7 @@ async def main():
         logger.info("Bot stopped by user.")
     finally:
         cleanup_task.cancel()
+        await uploader.stop()
         await bot.session.close()
         logger.info("Bot session closed.")
 
