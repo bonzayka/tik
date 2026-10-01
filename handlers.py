@@ -22,6 +22,8 @@ from utils import find_first_url, format_duration, format_size, detect_platform
 logger = logging.getLogger(__name__)
 router = Router()
 
+STANDARD_LIMIT = 50 * 1024 * 1024  # Standard Telegram Bot API upload limit
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Handles /start command with a welcome message."""
@@ -208,8 +210,6 @@ async def handle_download_callback(callback: CallbackQuery):
             video_duration = res.get("duration") or duration
             width = res.get("width")
             video_height = res.get("height")
-
-            STANDARD_LIMIT = 50 * 1024 * 1024
 
             # Check Telegram limit
             if filesize > MAX_FILE_SIZE_BYTES:

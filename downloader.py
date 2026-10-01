@@ -42,10 +42,11 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
 
     # Only apply YouTube specific configurations
     if is_youtube_url(url):
-        # 1. Use visionos and android clients to completely bypass "Sign in to confirm you're not a bot"
+        # 1. Use android client and skip webpage to bypass "Sign in to confirm you're not a bot" on datacenter IPs
         opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['visionos', 'android', 'android_vr']
+                'player_client': ['android'],
+                'player_skip': ['webpage', 'configs']
             }
         }
 
@@ -53,9 +54,7 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
         cookie_path = BASE_DIR / COOKIES_FILE
         if cookie_path.exists() and cookie_path.stat().st_size > 0:
             opts['cookiefile'] = str(cookie_path)
-            opts['extractor_args']['youtube']['player_client'] = ['web', 'android', 'ios']
         elif COOKIES_FROM_BROWSER:
-            # Only use browser cookies if explicitly requested in .env
             opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
 
     if custom_format:
@@ -63,35 +62,35 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
 
     return opts
 
+def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = False) -> Dict[str, Any]:
+    """Executes yt-dlp with automatic fallback for YouTube bot detection or format errors."""
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        err = str(e).lower()
+        if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable']):
+            logger.warning(f"YouTube error ({e}), retrying with clean android client...")
+            clean_opts = dict(ydl_opts)
+            clean_opts.pop('cookiefile', None)
+            clean_opts.pop('cookiesfrombrowser', None)
+            clean_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            }
+            with yt_dlp.YoutubeDL(clean_opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        raise
+
 def _extract_info_sync(url: str) -> Dict[str, Any]:
     """Synchronous info extraction with yt-dlp and fallback logic."""
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'extract_flat': False,
     }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception as e:
-        err_str = str(e)
-        # If blocked by YouTube bot detection, retry with android client
-        if is_youtube_url(url) and ("Sign in to confirm you’re not a bot" in err_str or "cookies" in err_str.lower()):
-            logger.warning("Sign-in requirement encountered, retrying with android client...")
-            fallback_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'js_runtimes': {'node': {}},
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android', 'android_vr']
-                    }
-                },
-                'extract_flat': False
-            }
-            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                return ydl.extract_info(url, download=False)
-        raise
+    return _run_ydl_with_retry(ydl_opts, url, download=False)
 
 async def get_video_info(url: str) -> Dict[str, Any]:
     """Asynchronously fetches metadata for a video URL."""
@@ -168,10 +167,9 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
         'merge_output_format': 'mp4',
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if 'entries' in info and info['entries']:
-            info = info['entries'][0]
+    info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    if 'entries' in info and info['entries']:
+        info = info['entries'][0]
             
     # Find downloaded file
     mp4_files = list(task_dir.glob("*.mp4"))
@@ -224,10 +222,9 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         }],
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if 'entries' in info and info['entries']:
-            info = info['entries'][0]
+    info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    if 'entries' in info and info['entries']:
+        info = info['entries'][0]
 
     mp3_files = list(task_dir.glob("*.mp3"))
     if not mp3_files:
@@ -267,10 +264,9 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         'outtmpl': raw_template,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if 'entries' in info and info['entries']:
-            info = info['entries'][0]
+    info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    if 'entries' in info and info['entries']:
+        info = info['entries'][0]
 
     raw_files = [f for f in task_dir.glob("raw_audio_*") if f.is_file() and not f.name.endswith('.part')]
     if not raw_files:
