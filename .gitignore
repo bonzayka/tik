@@ -4,5 +4,3 @@ __pycache__/
 *.pyc
 *.session
 *.session-journal
-cookies.txt
-*cookies*.txt

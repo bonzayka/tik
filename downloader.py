@@ -71,28 +71,29 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'js_runtimes': {'node': {}},
+        'js_runtimes': {'node': {}, 'deno': {}, 'quickjs': {}},
+        'remote_components': ['ejs:github'],
     }
 
     # Only apply YouTube specific configurations
     if is_youtube_url(url):
-        # 1. Use android client and skip webpage to bypass "Sign in to confirm you're not a bot" on datacenter IPs
-        opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['android'],
-                'player_skip': ['webpage', 'configs']
-            }
-        }
-
-        # 2. Check if cookies are provided (either cookies.txt or cookies.json)
+        # 1. Check if cookies are provided (either cookies.txt or cookies.json)
         ensure_cookies()
         cookie_path = BASE_DIR / COOKIES_FILE
         if cookie_path.exists() and cookie_path.stat().st_size > 0:
             opts['cookiefile'] = str(cookie_path)
         elif COOKIES_FROM_BROWSER:
             opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
+        else:
+            # If no cookies, default to android client without webpage to bypass bot checks
+            opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            }
 
-        # 3. Optional Proxy
+        # 2. Optional Proxy
         if PROXY:
             opts['proxy'] = PROXY
 
@@ -108,7 +109,7 @@ def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = Fal
             return ydl.extract_info(url, download=download)
     except Exception as e:
         err = str(e).lower()
-        if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable']):
+        if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable', 'reload']):
             logger.warning(f"YouTube attempt failed ({e}), trying clean android client without cookies...")
             clean_opts = dict(ydl_opts)
             clean_opts.pop('cookiefile', None)
