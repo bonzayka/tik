@@ -286,10 +286,14 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         str(voice_file)
     ]
     
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("На сервере не установлен FFmpeg! Установите его командой:\nsudo apt update && sudo apt install -y ffmpeg")
+
     if proc.returncode != 0:
         logger.error(f"FFmpeg error: {proc.stderr}")
-        raise RuntimeError(f"FFmpeg failed to convert to voice note: {proc.stderr}")
+        raise RuntimeError(f"FFmpeg error: {proc.stderr}")
 
     if not voice_file.exists():
         raise FileNotFoundError("Converted voice file not found")
