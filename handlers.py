@@ -5,9 +5,8 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
-
 from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, HAS_MTPROTO
-from mtproto_uploader import uploader as mtproto_uploader
+from mtproto_uploader import uploader as mtproto_uploader, UploadProgressTracker
 from downloader import (
     get_video_info,
     download_video,
@@ -240,9 +239,10 @@ async def handle_download_callback(callback: CallbackQuery):
 
             if filesize > STANDARD_LIMIT:
                 if mtproto_uploader.is_available:
+                    tracker = UploadProgressTracker(progress_msg, filesize, "видео")
                     await progress_msg.edit_text(
                         f"📤 <i>Загружаю большой файл ({format_size(filesize)}) через MTProto (до 2 ГБ)...</i>\n"
-                        f"<i>Это может занять немного больше времени.</i>",
+                        f"<i>Включена скоростная параллельная отправка 🚀</i>",
                         parse_mode="HTML"
                     )
                     await mtproto_uploader.send_video(
@@ -251,9 +251,13 @@ async def handle_download_callback(callback: CallbackQuery):
                         caption=video_caption,
                         duration=int(video_duration) if video_duration else 0,
                         width=width if width else 0,
-                        height=video_height if video_height else 0
+                        height=video_height if video_height else 0,
+                        progress_callback=tracker
                     )
-                    await progress_msg.delete()
+                    try:
+                        await progress_msg.delete()
+                    except Exception:
+                        pass
                 else:
                     await progress_msg.edit_text(
                         f"⚠️ <b>Файл превышает 50 МБ ({format_size(filesize)}).</b>\n\n"
@@ -300,8 +304,10 @@ async def handle_download_callback(callback: CallbackQuery):
 
             if filesize > STANDARD_LIMIT:
                 if mtproto_uploader.is_available:
+                    tracker = UploadProgressTracker(progress_msg, filesize, "аудио")
                     await progress_msg.edit_text(
-                        f"📤 <i>Загружаю аудио ({format_size(filesize)}) через MTProto...</i>",
+                        f"📤 <i>Загружаю аудиофайл ({format_size(filesize)}) через MTProto...</i>\n"
+                        f"<i>Включена скоростная параллельная отправка 🚀</i>",
                         parse_mode="HTML"
                     )
                     await mtproto_uploader.send_audio(
@@ -310,9 +316,13 @@ async def handle_download_callback(callback: CallbackQuery):
                         caption=audio_caption,
                         title=title,
                         performer=uploader,
-                        duration=int(audio_duration) if audio_duration else 0
+                        duration=int(audio_duration) if audio_duration else 0,
+                        progress_callback=tracker
                     )
-                    await progress_msg.delete()
+                    try:
+                        await progress_msg.delete()
+                    except Exception:
+                        pass
                 else:
                     await progress_msg.edit_text(
                         f"⚠️ <b>Аудиофайл превышает 50 МБ ({format_size(filesize)}).</b>",
@@ -357,17 +367,23 @@ async def handle_download_callback(callback: CallbackQuery):
 
             if filesize > STANDARD_LIMIT:
                 if mtproto_uploader.is_available:
+                    tracker = UploadProgressTracker(progress_msg, filesize, "голосового сообщения")
                     await progress_msg.edit_text(
-                        f"📤 <i>Загружаю голосовое ({format_size(filesize)}) через MTProto...</i>",
+                        f"📤 <i>Загружаю голосовое ({format_size(filesize)}) через MTProto...</i>\n"
+                        f"<i>Включена скоростная параллельная отправка 🚀</i>",
                         parse_mode="HTML"
                     )
                     await mtproto_uploader.send_voice(
                         chat_id=chat_id,
                         filepath=filepath,
                         caption=voice_caption,
-                        duration=int(voice_duration) if voice_duration else 0
+                        duration=int(voice_duration) if voice_duration else 0,
+                        progress_callback=tracker
                     )
-                    await progress_msg.delete()
+                    try:
+                        await progress_msg.delete()
+                    except Exception:
+                        pass
                 else:
                     await progress_msg.edit_text(
                         f"⚠️ <b>Голосовое сообщение превышает 50 МБ ({format_size(filesize)}).</b>",
