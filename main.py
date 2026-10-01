@@ -15,10 +15,14 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, DOWNLOADS_DIR, HAS_MTPROTO, MAX_FILE_SIZE_MB
+import config
+from config import BOT_TOKEN, DOWNLOADS_DIR, HAS_MTPROTO, MAX_FILE_SIZE_MB, VLESS_URL, BASE_DIR
 from handlers import router
 from task_manager import task_manager
 from mtproto_uploader import uploader
+from vless_tunnel import VlessTunnelManager
+
+vless_manager = VlessTunnelManager(vless_url=VLESS_URL, base_dir=BASE_DIR)
 
 # Configure logging
 logging.basicConfig(
@@ -73,6 +77,12 @@ async def periodic_cleanup():
 async def main():
     init_ffmpeg()
 
+    # Start VLESS Reality tunnel if configured
+    if VLESS_URL:
+        if vless_manager.start():
+            config.PROXY = vless_manager.get_proxy_url()
+            logger.info(f"VLESS tunnel integrated! Local proxy: {config.PROXY}")
+
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("BOT_TOKEN is not set. Please set it in .env file.")
         sys.exit(1)
@@ -109,6 +119,7 @@ async def main():
         logger.info("Bot stopped by user.")
     finally:
         cleanup_task.cancel()
+        vless_manager.stop()
         await uploader.stop()
         await bot.session.close()
         logger.info("Bot session closed.")

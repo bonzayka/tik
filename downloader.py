@@ -15,14 +15,14 @@ try:
 except ImportError:
     pass
 
+import config
 from config import (
     DOWNLOADS_DIR,
     SUPPORTED_QUALITIES,
     MAX_FILE_SIZE_BYTES,
     BASE_DIR,
     COOKIES_FILE,
-    COOKIES_FROM_BROWSER,
-    PROXY
+    COOKIES_FROM_BROWSER
 )
 
 logger = logging.getLogger(__name__)
@@ -93,9 +93,9 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
                 }
             }
 
-        # 2. Optional Proxy
-        if PROXY:
-            opts['proxy'] = PROXY
+        # 2. Optional Proxy (e.g. from VLESS tunnel or .env)
+        if config.PROXY:
+            opts['proxy'] = config.PROXY
 
     if custom_format:
         opts['format'] = custom_format
