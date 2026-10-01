@@ -22,3 +22,7 @@ SUPPORTED_QUALITIES = [1080, 720, 480, 360]
 
 # Task cache expiration (seconds)
 TASK_TTL_SECONDS = 3600
+
+# Cookies configuration for YouTube anti-bot bypass
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+COOKIES_FROM_BROWSER = os.getenv("COOKIES_FROM_BROWSER", "")

@@ -8,32 +8,104 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import yt_dlp
 
-from config import DOWNLOADS_DIR, SUPPORTED_QUALITIES, MAX_FILE_SIZE_BYTES
+from config import (
+    DOWNLOADS_DIR,
+    SUPPORTED_QUALITIES,
+    MAX_FILE_SIZE_BYTES,
+    BASE_DIR,
+    COOKIES_FILE,
+    COOKIES_FROM_BROWSER
+)
 
 logger = logging.getLogger(__name__)
 
-# Base yt-dlp options
-COMMON_YDL_OPTS = {
-    'quiet': True,
-    'no_warnings': True,
-    'noplaylist': True,
-    'js_runtimes': {'node': {}},
-    # Anti-bot detection / headers
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
+_cached_browser: Optional[str] = None
+
+def detect_browser_cookies() -> str:
+    """Attempts to find an available browser with readable YouTube cookies."""
+    global _cached_browser
+    if _cached_browser is not None:
+        return _cached_browser
+
+    if COOKIES_FROM_BROWSER:
+        _cached_browser = COOKIES_FROM_BROWSER
+        return COOKIES_FROM_BROWSER
+
+    # Try supported browsers on Windows/Linux
+    for b in ['firefox', 'chrome', 'edge', 'brave', 'opera']:
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'cookiesfrombrowser': (b,),
+                'extract_flat': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts):
+                pass
+            _cached_browser = b
+            logger.info(f"Auto-detected working cookies from browser: {b}")
+            return b
+        except Exception:
+            continue
+
+    _cached_browser = ""
+    return ""
+
+def get_base_ydl_opts() -> Dict[str, Any]:
+    """Generates standard yt-dlp options with anti-bot bypass and cookie integration."""
+    opts: Dict[str, Any] = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'js_runtimes': {'node': {}},
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
     }
-}
+
+    # 1. Check for cookies file
+    cookie_path = BASE_DIR / COOKIES_FILE
+    if cookie_path.exists() and cookie_path.stat().st_size > 0:
+        opts['cookiefile'] = str(cookie_path)
+    else:
+        # 2. Try browser cookies
+        browser = detect_browser_cookies()
+        if browser:
+            opts['cookiesfrombrowser'] = (browser,)
+
+    return opts
 
 def _extract_info_sync(url: str) -> Dict[str, Any]:
-    """Synchronous info extraction with yt-dlp."""
+    """Synchronous info extraction with yt-dlp and fallback logic."""
     ydl_opts = {
-        **COMMON_YDL_OPTS,
+        **get_base_ydl_opts(),
         'extract_flat': False,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return info
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        err_str = str(e)
+        # If blocked by YouTube bot detection, retry with fallback android client
+        if "Sign in to confirm you’re not a bot" in err_str or "cookies" in err_str.lower():
+            logger.warning("Sign-in required detected, attempting fallback with android player client...")
+            fallback_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'js_runtimes': {'node': {}},
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android']
+                    }
+                },
+                'extract_flat': False
+            }
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        raise
 
 async def get_video_info(url: str) -> Dict[str, Any]:
     """Asynchronously fetches metadata for a video URL."""
@@ -109,7 +181,7 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
 
     out_template = str(task_dir / "video_%(id)s.%(ext)s")
     ydl_opts = {
-        **COMMON_YDL_OPTS,
+        **get_base_ydl_opts(),
         'format': format_selector,
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
@@ -162,7 +234,7 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     """Synchronous audio download as MP3."""
     out_template = str(task_dir / "audio_%(id)s.%(ext)s")
     ydl_opts = {
-        **COMMON_YDL_OPTS,
+        **get_base_ydl_opts(),
         'format': 'bestaudio/best',
         'outtmpl': out_template,
         'postprocessors': [{
@@ -211,7 +283,7 @@ def _download_voice_sync(url: str, task_dir: Path) -> Dict[str, Any]:
     # 1. First download best audio
     raw_template = str(task_dir / "raw_audio_%(id)s.%(ext)s")
     ydl_opts = {
-        **COMMON_YDL_OPTS,
+        **get_base_ydl_opts(),
         'format': 'bestaudio/best',
         'outtmpl': raw_template,
     }
