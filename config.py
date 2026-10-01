@@ -33,3 +33,6 @@ TASK_TTL_SECONDS = 3600
 # Cookies configuration for YouTube anti-bot bypass
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
 COOKIES_FROM_BROWSER = os.getenv("COOKIES_FROM_BROWSER", "")
+
+# Optional proxy for bypassing datacenter IP bans (http://user:pass@host:port or socks5://host:port)
+PROXY = os.getenv("PROXY", os.getenv("YOUTUBE_PROXY", ""))

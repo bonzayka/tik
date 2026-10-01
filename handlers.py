@@ -72,12 +72,23 @@ async def handle_url_message(message: Message):
     info = await get_video_info(url)
     if not info.get("success"):
         err = html.escape(str(info.get("error", "Неизвестная ошибка")))
-        await status_msg.edit_text(
-            f"❌ <b>Не удалось загрузить информацию о видео.</b>\n\n"
-            f"Возможно, видео приватное, удалено или ссылка некорректна.\n"
-            f"<i>Детали: {err}</i>",
-            parse_mode="HTML"
-        )
+        if any(w in err.lower() for w in ["bot", "sign in", "cookies", "confirm"]):
+            await status_msg.edit_text(
+                "⚠️ <b>YouTube заблокировал IP-адрес сервера (Anti-Bot)</b>\n\n"
+                "Сервер находится в дата-центре, и YouTube заблокировал доступ без куки.\n\n"
+                "💡 <b>Как решить (выберите один из вариантов):</b>\n"
+                "1. <b>Файл куки:</b> сохраните куки из браузера (расширение <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i>) и положите <code>cookies.txt</code> (или <code>cookies.json</code>) в папку бота на сервере.\n"
+                "2. <b>Прокси:</b> укажите прокси в файле <code>.env</code> (параметр <code>PROXY=http://login:pass@ip:port</code>).\n\n"
+                f"<i>Детали: {err}</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ <b>Не удалось загрузить информацию о видео.</b>\n\n"
+                f"Возможно, видео приватное, удалено или ссылка некорректна.\n"
+                f"<i>Детали: {err}</i>",
+                parse_mode="HTML"
+            )
         return
 
     if info.get("is_live"):
@@ -379,10 +390,21 @@ async def handle_download_callback(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Error processing download callback: {e}", exc_info=True)
         err_msg = html.escape(str(e))
-        await progress_msg.edit_text(
-            f"❌ <b>Произошла ошибка при обработке:</b>\n<code>{err_msg}</code>",
-            parse_mode="HTML"
-        )
+        if any(w in err_msg.lower() for w in ["bot", "sign in", "cookies", "confirm"]):
+            user_friendly = (
+                "⚠️ <b>YouTube заблокировал скачивание с IP-адреса сервера (Anti-Bot)</b>\n\n"
+                "IP-адрес вашего сервера (дата-центра) временно ограничен YouTube для загрузки медиапотоков.\n\n"
+                "💡 <b>Как решить (выберите один из вариантов):</b>\n"
+                "1. <b>Файл куки:</b> сохраните куки из браузера (расширение <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i>) и положите файл <code>cookies.txt</code> (или <code>cookies.json</code>) в папку бота на сервере.\n"
+                "2. <b>Прокси:</b> укажите прокси в файле <code>.env</code> (параметр <code>PROXY=http://login:pass@ip:port</code>).\n\n"
+                f"<i>Техническая ошибка: {err_msg}</i>"
+            )
+            await progress_msg.edit_text(user_friendly, parse_mode="HTML")
+        else:
+            await progress_msg.edit_text(
+                f"❌ <b>Произошла ошибка при обработке:</b>\n<code>{err_msg}</code>",
+                parse_mode="HTML"
+            )
     finally:
         if task_dir:
             cleanup_task_dir(task_dir)

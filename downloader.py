@@ -21,10 +21,44 @@ from config import (
     MAX_FILE_SIZE_BYTES,
     BASE_DIR,
     COOKIES_FILE,
-    COOKIES_FROM_BROWSER
+    COOKIES_FROM_BROWSER,
+    PROXY
 )
 
 logger = logging.getLogger(__name__)
+
+def ensure_cookies():
+    """Converts cookies.json to cookies.txt if cookies.json exists and cookies.txt doesn't or is older."""
+    json_path = BASE_DIR / "cookies.json"
+    txt_path = BASE_DIR / COOKIES_FILE
+    if json_path.exists() and json_path.stat().st_size > 0:
+        if not txt_path.exists() or txt_path.stat().st_mtime < json_path.stat().st_mtime:
+            try:
+                import json
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    lines = [
+                        '# Netscape HTTP Cookie File',
+                        '# https://curl.se/rfc/cookie_spec.html',
+                        '# This is a generated file!  Do not edit.',
+                        ''
+                    ]
+                    for c in data:
+                        domain = c.get('domain', '')
+                        flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                        path = c.get('path', '/')
+                        secure = 'TRUE' if c.get('secure', False) else 'FALSE'
+                        exp = int(c.get('expirationDate', 2147483647))
+                        name = c.get('name', '')
+                        val = c.get('value', '')
+                        if name and val:
+                            lines.append(f'{domain}\t{flag}\t{path}\t{secure}\t{exp}\t{name}\t{val}')
+                    with open(txt_path, 'w', encoding='utf-8') as out:
+                        out.write('\n'.join(lines) + '\n')
+                    logger.info(f"Converted cookies.json to {COOKIES_FILE} ({len(lines)-4} cookies)")
+            except Exception as e:
+                logger.warning(f"Failed to convert cookies.json: {e}")
 
 def is_youtube_url(url: str) -> bool:
     """Checks if the URL belongs to YouTube or YouTube Music."""
@@ -50,12 +84,17 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
             }
         }
 
-        # 2. Check if cookies.txt is provided on the server
+        # 2. Check if cookies are provided (either cookies.txt or cookies.json)
+        ensure_cookies()
         cookie_path = BASE_DIR / COOKIES_FILE
         if cookie_path.exists() and cookie_path.stat().st_size > 0:
             opts['cookiefile'] = str(cookie_path)
         elif COOKIES_FROM_BROWSER:
             opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
+
+        # 3. Optional Proxy
+        if PROXY:
+            opts['proxy'] = PROXY
 
     if custom_format:
         opts['format'] = custom_format
@@ -63,14 +102,14 @@ def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[
     return opts
 
 def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = False) -> Dict[str, Any]:
-    """Executes yt-dlp with automatic fallback for YouTube bot detection or format errors."""
+    """Executes yt-dlp with automatic fallback across multiple clients and modes."""
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=download)
     except Exception as e:
         err = str(e).lower()
         if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable']):
-            logger.warning(f"YouTube error ({e}), retrying with clean android client...")
+            logger.warning(f"YouTube attempt failed ({e}), trying clean android client without cookies...")
             clean_opts = dict(ydl_opts)
             clean_opts.pop('cookiefile', None)
             clean_opts.pop('cookiesfrombrowser', None)
@@ -80,8 +119,20 @@ def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = Fal
                     'player_skip': ['webpage', 'configs']
                 }
             }
-            with yt_dlp.YoutubeDL(clean_opts) as ydl:
-                return ydl.extract_info(url, download=download)
+            try:
+                with yt_dlp.YoutubeDL(clean_opts) as ydl:
+                    return ydl.extract_info(url, download=download)
+            except Exception as e2:
+                logger.warning(f"Android retry also failed ({e2}), trying ios and web_embedded fallback...")
+                ios_opts = dict(clean_opts)
+                ios_opts['extractor_args'] = {
+                    'youtube': {
+                        'player_client': ['ios', 'web_embedded'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
+                with yt_dlp.YoutubeDL(ios_opts) as ydl:
+                    return ydl.extract_info(url, download=download)
         raise
 
 def _extract_info_sync(url: str) -> Dict[str, Any]:
