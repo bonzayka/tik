@@ -56,17 +56,22 @@ def init_ffmpeg():
 
 async def periodic_cleanup():
     """Periodically cleans up expired tasks and orphaned files."""
+    import time
     while True:
         try:
             await asyncio.sleep(600)  # Every 10 minutes
             task_manager.cleanup_expired()
             
-            # Clean up old empty subdirectories in downloads if any
+            # Clean up old subdirectories in downloads (older than 30 mins) or empty ones
             if DOWNLOADS_DIR.exists():
+                now = time.time()
                 for item in DOWNLOADS_DIR.iterdir():
-                    if item.is_dir() and not any(item.iterdir()):
+                    if item.is_dir():
                         try:
-                            item.rmdir()
+                            is_empty = not any(item.iterdir())
+                            is_old = (now - item.stat().st_mtime) > 1800
+                            if is_empty or is_old:
+                                shutil.rmtree(item, ignore_errors=True)
                         except Exception:
                             pass
         except asyncio.CancelledError:

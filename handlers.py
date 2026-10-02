@@ -39,7 +39,9 @@ from utils import (
     format_duration,
     format_size,
     detect_platform,
-    parse_time_range
+    parse_time_range,
+    clean_social_url,
+    resolve_short_url_sync
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,9 @@ async def handle_url_message(message: Message):
     text = message.text.strip()
     url = find_first_url(text)
     time_range = parse_time_range(text)
+    if url:
+        url = clean_social_url(url)
+        url = resolve_short_url_sync(url)
 
     # If message has no URL but contains timecode: apply to recent task for this chat
     if not url and time_range:
@@ -390,11 +395,19 @@ async def handle_download_callback(callback: CallbackQuery):
             if media_type == "photo":
                 await progress_msg.edit_text("📤 <i>Отправляю фотографию...</i>", parse_mode="HTML")
                 photo_caption = f"📸 <b>{html.escape(title)}</b>\n\n👤 {html.escape(uploader)}"
-                await callback.message.reply_photo(
-                    photo=FSInputFile(filepath),
-                    caption=photo_caption,
-                    parse_mode="HTML"
-                )
+                try:
+                    await callback.message.reply_photo(
+                        photo=FSInputFile(filepath),
+                        caption=photo_caption,
+                        parse_mode="HTML"
+                    )
+                except Exception as e_p:
+                    logger.warning(f"reply_photo failed ({e_p}), fallback to reply_document...")
+                    await callback.message.reply_document(
+                        document=FSInputFile(filepath),
+                        caption=photo_caption,
+                        parse_mode="HTML"
+                    )
                 try:
                     await progress_msg.delete()
                 except Exception:
@@ -416,7 +429,19 @@ async def handle_download_callback(callback: CallbackQuery):
                     else:
                         group.append(InputMediaVideo(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
                 if group:
-                    await callback.message.reply_media_group(media=group)
+                    try:
+                        await callback.message.reply_media_group(media=group)
+                    except Exception as e_grp:
+                        logger.warning(f"reply_media_group failed ({e_grp}), sending files individually...")
+                        for fpath in media_files[:10]:
+                            is_img = Path(fpath).suffix.lower() in image_exts
+                            try:
+                                if is_img:
+                                    await callback.message.reply_photo(photo=FSInputFile(fpath))
+                                else:
+                                    await callback.message.reply_video(video=FSInputFile(fpath))
+                            except Exception:
+                                await callback.message.reply_document(document=FSInputFile(fpath))
                 try:
                     await progress_msg.delete()
                 except Exception:
@@ -661,7 +686,17 @@ async def handle_download_callback(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Error processing download callback: {e}", exc_info=True)
         err_msg = html.escape(str(e))
-        if any(w in err_msg.lower() for w in ["bot", "sign in", "cookies", "confirm"]):
+        err_lower = str(e).lower()
+        if "instagram" in err_lower and any(w in err_lower for w in ["login", "rate limit", "checkpoint", "cookies", "restricted"]):
+            user_friendly = (
+                "⚠️ <b>Instagram ограничил доступ к этому контенту без авторизации.</b>\n\n"
+                "💡 <i>Если этот аккаунт или публикация приватная, либо Instagram ограничил просмотр с IP сервера:</i>\n\n"
+                "1. <b>Файл куки:</b> сохраните куки из браузера (с авторизованным Instagram) и положите файл <code>cookies.txt</code> в папку бота на сервере.\n"
+                "2. <b>Прокси:</b> укажите прокси в файле <code>.env</code> (параметр <code>PROXY=http://login:pass@ip:port</code>).\n\n"
+                f"<i>Техническая ошибка: {err_msg}</i>"
+            )
+            await progress_msg.edit_text(user_friendly, parse_mode="HTML")
+        elif any(w in err_msg.lower() for w in ["bot", "sign in", "cookies", "confirm"]):
             user_friendly = (
                 "⚠️ <b>YouTube заблокировал скачивание с IP-адреса сервера (Anti-Bot)</b>\n\n"
                 "IP-адрес вашего сервера (дата-центра) временно ограничен YouTube для загрузки медиапотоков.\n\n"

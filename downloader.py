@@ -15,6 +15,66 @@ try:
 except ImportError:
     pass
 
+# Monkey-patch yt-dlp extractors to support photo posts and carousels
+try:
+    from yt_dlp.extractor.pinterest import PinterestIE
+    _orig_pin_extract = PinterestIE._extract_video
+
+    def _patched_pinterest_extract_video(self, data, extract_formats=True):
+        res = _orig_pin_extract(self, data, extract_formats=extract_formats)
+        if not res.get('formats'):
+            images = data.get('images', {})
+            img_url, w, h = None, None, None
+            if isinstance(images, dict):
+                orig = images.get('orig') or images.get('736x') or images.get('564x')
+                if isinstance(orig, dict):
+                    img_url = orig.get('url')
+                    w = orig.get('width')
+                    h = orig.get('height')
+            if not img_url and res.get('thumbnails'):
+                t = res['thumbnails'][-1]
+                img_url = t.get('url')
+                w = t.get('width')
+                h = t.get('height')
+            if img_url:
+                res['formats'] = [{
+                    'url': img_url,
+                    'format_id': 'image_orig',
+                    'ext': 'jpg',
+                    'width': w,
+                    'height': h,
+                    'vcodec': 'none',
+                    'acodec': 'none',
+                }]
+        return res
+
+    PinterestIE._extract_video = _patched_pinterest_extract_video
+except Exception as _e:
+    pass
+
+try:
+    from yt_dlp.extractor.instagram import InstagramIE
+    _orig_ig_extract_media = InstagramIE._extract_product_media
+
+    def _patched_ig_extract_product_media(self, product_media):
+        res = _orig_ig_extract_media(self, product_media)
+        if not res.get('formats') and res.get('thumbnails'):
+            best_thumb = res['thumbnails'][-1]
+            res['formats'] = [{
+                'url': best_thumb['url'],
+                'format_id': 'image_orig',
+                'ext': 'jpg',
+                'width': best_thumb.get('width'),
+                'height': best_thumb.get('height'),
+                'vcodec': 'none',
+                'acodec': 'none',
+            }]
+        return res
+
+    InstagramIE._extract_product_media = _patched_ig_extract_product_media
+except Exception as _e:
+    pass
+
 import config
 from config import (
     DOWNLOADS_DIR,
@@ -24,6 +84,7 @@ from config import (
     COOKIES_FILE,
     COOKIES_FROM_BROWSER
 )
+from utils import clean_social_url, resolve_short_url_sync
 
 logger = logging.getLogger(__name__)
 
@@ -70,84 +131,156 @@ def is_playlist_url(url: str) -> bool:
     u = url.lower()
     return ("youtube.com" in u or "youtu.be" in u) and ("list=" in u) and ("list=wl" not in u)
 
-def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[str, Any]:
-    """Generates optimal yt-dlp options tailored to the specific platform."""
-    opts: Dict[str, Any] = {
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'js_runtimes': {'node': {}, 'deno': {}, 'quickjs': {}},
-        'remote_components': ['ejs:github'],
+def _fetch_pinterest_direct_info(url: str) -> Optional[Dict[str, Any]]:
+    """Directly extracts media info from Pinterest API or HTML if yt-dlp fails."""
+    import urllib.request
+    import urllib.parse
+    import json
+    import re
+    
+    clean_u = resolve_short_url_sync(url)
+    m = re.search(r'/pin/(?:[\w-]+--)?(\d+)', clean_u)
+    pin_id = m.group(1) if m else None
+    
+    title = "Pinterest Pin"
+    uploader = "Pinterest"
+    media_url = None
+    media_type = "photo"
+    thumb_url = None
+    
+    # 1. Unauth PinResource API
+    if pin_id:
+        try:
+            q = urllib.parse.urlencode({'data': json.dumps({'options': {'field_set_key': 'unauth_react_main_pin', 'id': pin_id}})})
+            api_req = urllib.request.Request(
+                f'https://www.pinterest.com/resource/PinResource/get/?{q}',
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'X-Pinterest-PWS-Handler': 'www/[username].js',
+                    'Accept': 'application/json, text/javascript, */*, q=0.01'
+                }
+            )
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            with opener.open(api_req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8')).get('resource_response', {}).get('data', {})
+                if data:
+                    title = data.get('title') or data.get('grid_title') or title
+                    uploader = (data.get('closeup_attribution') or {}).get('full_name') or uploader
+                    videos = data.get('videos', {})
+                    video_list = videos.get('video_list') if isinstance(videos, dict) else None
+                    if video_list and isinstance(video_list, dict):
+                        for vk, vd in video_list.items():
+                            if isinstance(vd, dict) and vd.get('url') and not vd['url'].endswith('.m3u8'):
+                                media_url = vd['url']
+                                media_type = 'video'
+                                break
+                    images = data.get('images', {})
+                    orig = images.get('orig') or images.get('736x') or images.get('564x')
+                    if orig and orig.get('url'):
+                        thumb_url = orig.get('url')
+                        if not media_url:
+                            media_url = orig['url']
+                            media_type = 'photo'
+        except Exception as e:
+            logger.debug(f"Pinterest PinResource API failed: {e}")
+
+    # 2. HTML parsing fallback
+    if not media_url:
+        try:
+            req = urllib.request.Request(
+                clean_u,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+            )
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            with opener.open(req, timeout=10) as resp:
+                html = resp.read().decode('utf-8', errors='ignore')
+                
+            og_v = re.search(r'<meta\s+property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', html)
+            if og_v:
+                media_url = og_v.group(1)
+                media_type = 'video'
+            else:
+                og_i = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
+                if og_i:
+                    img = og_i.group(1)
+                    media_url = re.sub(r'/(?:736x|474x|236x|564x)/', '/originals/', img)
+                    media_type = 'photo'
+                    thumb_url = media_url
+        except Exception as e:
+            logger.debug(f"Pinterest HTML fallback failed: {e}")
+
+    if not media_url:
+        return None
+
+    return {
+        'id': pin_id or 'pinterest_pin',
+        'title': title,
+        'uploader': uploader,
+        'thumbnail': thumb_url or media_url,
+        'extractor': 'pinterest',
+        'duration': 0,
+        'formats': [{
+            'url': media_url,
+            'format_id': 'direct',
+            'ext': 'mp4' if media_type == 'video' else 'jpg',
+            'vcodec': 'none' if media_type == 'photo' else 'h264',
+            'acodec': 'none' if media_type == 'photo' else 'aac',
+        }],
+        '_direct_url': media_url,
+        '_media_type': media_type
     }
 
-    # Only apply YouTube specific configurations
-    if is_youtube_url(url):
-        # 1. Check if cookies are provided (either cookies.txt or cookies.json)
-        ensure_cookies()
-        cookie_path = BASE_DIR / COOKIES_FILE
-        if cookie_path.exists() and cookie_path.stat().st_size > 0:
-            opts['cookiefile'] = str(cookie_path)
-        elif COOKIES_FROM_BROWSER:
-            opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
-        else:
-            # If no cookies, default to android client without webpage to bypass bot checks
-            opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['android'],
-                    'player_skip': ['webpage', 'configs']
-                }
-            }
-
-        # 2. Optional Proxy (e.g. from VLESS tunnel or .env)
-        if config.PROXY:
-            opts['proxy'] = config.PROXY
-
-    if custom_format:
-        opts['format'] = custom_format
-
-    return opts
-
-def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = False) -> Dict[str, Any]:
-    """Executes yt-dlp with automatic fallback across multiple clients and modes."""
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=download)
-    except Exception as e:
-        err = str(e).lower()
-        if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable', 'reload']):
-            logger.warning(f"YouTube attempt failed ({e}), trying clean android client without cookies...")
-            clean_opts = dict(ydl_opts)
-            clean_opts.pop('cookiefile', None)
-            clean_opts.pop('cookiesfrombrowser', None)
-            clean_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['android'],
-                    'player_skip': ['webpage', 'configs']
-                }
-            }
-            try:
-                with yt_dlp.YoutubeDL(clean_opts) as ydl:
-                    return ydl.extract_info(url, download=download)
-            except Exception as e2:
-                logger.warning(f"Android retry also failed ({e2}), trying ios and web_embedded fallback...")
-                ios_opts = dict(clean_opts)
-                ios_opts['extractor_args'] = {
-                    'youtube': {
-                        'player_client': ['ios', 'web_embedded'],
-                        'player_skip': ['webpage', 'configs']
-                    }
-                }
-                with yt_dlp.YoutubeDL(ios_opts) as ydl:
-                    return ydl.extract_info(url, download=download)
-        raise
+def _download_pinterest_direct(url: str, task_dir: Path) -> Dict[str, Any]:
+    """Directly downloads Pinterest media (photo or video) into task_dir."""
+    import urllib.request
+    
+    info = _fetch_pinterest_direct_info(url)
+    if not info or not info.get('_direct_url'):
+        raise ValueError("Не удалось получить прямую ссылку на медиа Pinterest")
+        
+    direct_url = info['_direct_url']
+    media_type = info['_media_type']
+    pin_id = info.get('id', 'pin')
+    ext = '.mp4' if media_type == 'video' else '.jpg'
+    target_file = task_dir / f"pinterest_{pin_id}{ext}"
+    
+    req = urllib.request.Request(
+        direct_url,
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp, open(target_file, 'wb') as f:
+        shutil.copyfileobj(resp, f)
+        
+    filesize = target_file.stat().st_size
+    return {
+        'media_type': media_type,
+        'filepath': str(target_file),
+        'files': [str(target_file)],
+        'filesize': filesize,
+        'duration': 0,
+        'width': 0,
+        'height': 0,
+        'title': info.get('title', 'Pinterest Pin'),
+        'uploader': info.get('uploader', 'Pinterest')
+    }
 
 def _extract_info_sync(url: str) -> Dict[str, Any]:
     """Synchronous info extraction with yt-dlp and fallback logic."""
+    url = resolve_short_url_sync(url)
+    url = clean_social_url(url)
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'extract_flat': False,
+        'format': 'bestvideo+bestaudio/best/all',
     }
-    return _run_ydl_with_retry(ydl_opts, url, download=False)
+    try:
+        return _run_ydl_with_retry(ydl_opts, url, download=False)
+    except Exception as e:
+        if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
+            direct = _fetch_pinterest_direct_info(url)
+            if direct:
+                return direct
+        raise
 
 def estimate_format_sizes(info: Dict[str, Any], resolutions: List[int]) -> Dict[str, Any]:
     """
@@ -309,25 +442,35 @@ async def get_video_info(url: str) -> Dict[str, Any]:
 
 def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None) -> Dict[str, Any]:
     """Synchronous media download (supports video, photo, and multi-file carousels)."""
+    url = resolve_short_url_sync(url)
+    url = clean_social_url(url)
+
     if height:
         format_selector = (
             f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/"
             f"bv*[height<={height}]+ba/"
             f"b[height<={height}]/"
-            f"best"
+            f"best/"
+            f"all"
         )
     else:
-        format_selector = "bestvideo+bestaudio/best"
+        format_selector = "bestvideo+bestaudio/best/all"
 
     out_template = str(task_dir / "%(id)s_%(autonumber)s.%(ext)s")
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'format': format_selector,
         'outtmpl': out_template,
-        'merge_output_format': 'mp4',
     }
 
-    info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    try:
+        info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    except Exception as e:
+        if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
+            logger.info(f"yt-dlp Pinterest download failed ({e}), trying direct download...")
+            return _download_pinterest_direct(url, task_dir)
+        raise
+
     if 'entries' in info and info['entries']:
         info_first = info['entries'][0]
     else:
@@ -339,6 +482,8 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
         if f.is_file() and not f.name.endswith('.part') and not f.name.endswith('.ytdl')
     ]
     if not all_files:
+        if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
+            return _download_pinterest_direct(url, task_dir)
         raise FileNotFoundError("Downloaded media file not found")
 
     image_exts = {'.jpg', '.jpeg', '.png', '.webp'}

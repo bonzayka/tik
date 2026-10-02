@@ -16,6 +16,43 @@ def find_first_url(text: str) -> Optional[str]:
         return match.group(0)
     return None
 
+def clean_social_url(url: str) -> str:
+    """Normalizes mobile share URLs (e.g. Instagram /share/) and removes tracking parameters."""
+    if not url:
+        return url
+    # Clean instagram share link: /share/p/ -> /p/, /share/reel/ -> /reel/
+    url = re.sub(r'instagram\.com/share/(p|reel|tv)/', r'instagram.com/\1/', url, flags=re.IGNORECASE)
+    # Strip tracking parameters for social links
+    if any(d in url.lower() for d in ['instagram.com', 'tiktok.com', 'pinterest.com', 'pin.it', 'twitter.com', 'x.com', 'reddit.com']):
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        if parsed.query:
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            for k in list(qs.keys()):
+                if any(t in k.lower() for t in ['utm_', 'igsh', 'share_id', 'invite_code', 'tt_from', 'feature']):
+                    qs.pop(k, None)
+            new_q = urllib.parse.urlencode(qs, doseq=True)
+            url = urllib.parse.urlunparse(parsed._replace(query=new_q))
+    return url
+
+def resolve_short_url_sync(url: str) -> str:
+    """Follows HTTP redirects for short URLs like pin.it."""
+    if 'pin.it' in url.lower():
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+            )
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            with opener.open(req, timeout=10) as resp:
+                final = resp.geturl()
+                if final and 'pinterest.com' in final:
+                    return final
+        except Exception:
+            pass
+    return url
+
 def format_duration(seconds: Optional[int | float]) -> str:
     """Formats duration in seconds to MM:SS or HH:MM:SS."""
     if not seconds or seconds < 0:
