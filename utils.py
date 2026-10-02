@@ -30,11 +30,16 @@ def format_duration(seconds: Optional[int | float]) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
 
-def format_size(size_bytes: int | float) -> str:
-    """Formats file size in bytes to human-readable string."""
+def format_size(size_bytes: Optional[int | float]) -> str:
+    """Formats file size in bytes to human-readable string (КБ, МБ, ГБ)."""
+    if not size_bytes or size_bytes <= 0:
+        return "0 КБ"
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} КБ"
-    return f"{size_bytes / (1024 * 1024):.1f} МБ"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} МБ"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} ГБ"
 
 def detect_platform(url: str, extractor: Optional[str] = None) -> str:
     """Returns a friendly platform label."""

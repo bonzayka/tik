@@ -104,6 +104,7 @@ async def handle_url_message(message: Message):
     thumbnail = info.get("thumbnail")
     extractor = info.get("extractor", "")
     resolutions = info.get("resolutions", [])
+    estimated_sizes = info.get("estimated_sizes", {})
     platform_name = detect_platform(url, extractor)
     is_youtube = "youtube" in extractor
 
@@ -120,14 +121,34 @@ async def handle_url_message(message: Message):
     keyboard = create_download_keyboard(
         task_id=task_id,
         resolutions=resolutions,
-        is_youtube=is_youtube
+        is_youtube=is_youtube,
+        estimated_sizes=estimated_sizes
     )
+
+    # Format optional size breakdown in description
+    size_lines = []
+    res_sizes = (estimated_sizes or {}).get("resolutions", {})
+    if is_youtube and resolutions:
+        for r in resolutions:
+            s = res_sizes.get(r)
+            badge = " (4K)" if r >= 2160 else (" (2K)" if r >= 1440 else (" (FHD)" if r >= 1080 else (" (HD)" if r == 720 else "")))
+            if s:
+                size_lines.append(f"• <b>{r}p{badge}:</b> ~{format_size(s)}")
+
+        audio_s = (estimated_sizes or {}).get("audio_size")
+        if audio_s:
+            size_lines.append(f"• <b>MP3 Аудио:</b> ~{format_size(audio_s)}")
+
+    sizes_text = ""
+    if size_lines:
+        sizes_text = "\n📊 <b>Примерный вес:</b>\n" + "\n".join(size_lines) + "\n"
 
     caption_text = (
         f"{platform_name}\n"
         f"📌 <b>{html.escape(title)}</b>\n\n"
         f"👤 <b>Автор:</b> {html.escape(uploader)}\n"
-        f"⏱ <b>Длительность:</b> {format_duration(duration)}\n\n"
+        f"⏱ <b>Длительность:</b> {format_duration(duration)}\n"
+        f"{sizes_text}\n"
         f"👇 <i>Выберите, в каком формате скачать:</i>"
     )
 
@@ -206,7 +227,19 @@ async def handle_download_callback(callback: CallbackQuery):
             # Video download
             res_str = parts[3] if len(parts) > 3 else "best"
             height = int(res_str) if res_str.isdigit() else None
-            quality_label = f"{height}p" if height else "HD"
+            if height:
+                if height >= 2160:
+                    quality_label = f"{height}p (4K)"
+                elif height >= 1440:
+                    quality_label = f"{height}p (2K)"
+                elif height >= 1080:
+                    quality_label = f"{height}p (FHD)"
+                elif height == 720:
+                    quality_label = f"{height}p (HD)"
+                else:
+                    quality_label = f"{height}p"
+            else:
+                quality_label = "HD"
 
             await progress_msg.edit_text(
                 f"⏳ <b>Скачиваю видео ({quality_label})...</b>\n<i>Это может занять некоторое время.</i>",

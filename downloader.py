@@ -144,8 +144,104 @@ def _extract_info_sync(url: str) -> Dict[str, Any]:
     }
     return _run_ydl_with_retry(ydl_opts, url, download=False)
 
+def estimate_format_sizes(info: Dict[str, Any], resolutions: List[int]) -> Dict[str, Any]:
+    """
+    Estimates file sizes for each resolution, as well as MP3 audio, voice note, and direct video.
+    Takes into account separate video + audio streams (DASH) and progressive formats.
+    """
+    formats = info.get('formats') or []
+    duration = info.get('duration') or 0
+
+    # 1. Best audio stream size
+    best_audio_size = 0
+    best_audio_abr = 0
+    for f in formats:
+        vcodec = f.get('vcodec')
+        acodec = f.get('acodec')
+        # Audio-only stream
+        if (not vcodec or vcodec == 'none') and acodec and acodec != 'none':
+            abr = f.get('abr') or f.get('tbr') or 0
+            size = f.get('filesize') or f.get('filesize_approx')
+            if not size and abr and duration:
+                size = int(abr * 1000 / 8 * duration)
+            if size and abr >= best_audio_abr:
+                best_audio_abr = abr
+                best_audio_size = size
+
+    # Fallback default audio estimate if audio stream is missing (128 kbps)
+    if not best_audio_size and duration:
+        best_audio_size = int(128 * 1000 / 8 * duration)
+
+    # 2. Estimate size for each target resolution
+    res_sizes: Dict[int, Optional[int]] = {}
+    for res in resolutions:
+        # Match formats where dimension <= res
+        matching_formats = []
+        for f in formats:
+            h = f.get('height') or 0
+            w = f.get('width') or 0
+            vcodec = f.get('vcodec')
+            dim = min(h, w) if (h and w) else (h or w)
+            if dim and vcodec and vcodec != 'none' and dim <= res:
+                matching_formats.append((dim, f))
+
+        if not matching_formats:
+            res_sizes[res] = None
+            continue
+
+        # Target the highest available dimension <= res
+        max_dim = max(dim for dim, _ in matching_formats)
+        target_formats = [f for dim, f in matching_formats if dim == max_dim]
+
+        best_video_size = 0
+        best_is_progressive = False
+        best_vbr = 0
+
+        for f in target_formats:
+            acodec = f.get('acodec')
+            is_prog = bool(acodec and acodec != 'none')
+            size = f.get('filesize') or f.get('filesize_approx')
+            bitrate = f.get('tbr') or f.get('vbr') or 0
+            if not size and bitrate and duration:
+                size = int(bitrate * 1000 / 8 * duration)
+
+            if size and (bitrate >= best_vbr or size > best_video_size):
+                best_vbr = bitrate
+                best_video_size = size
+                best_is_progressive = is_prog
+
+        if best_video_size > 0:
+            total_est = best_video_size if best_is_progressive else (best_video_size + best_audio_size)
+            res_sizes[res] = total_est
+        else:
+            res_sizes[res] = None
+
+    # 3. Audio MP3 size (approx 192 kbps)
+    mp3_size = int(192 * 1000 / 8 * duration) if duration else best_audio_size
+
+    # 4. Voice note OGG Opus size (approx 64 kbps mono)
+    voice_size = int(64 * 1000 / 8 * duration) if duration else None
+
+    # 5. Single video (for TikTok or non-YouTube)
+    video_best = info.get('filesize') or info.get('filesize_approx')
+    if not video_best and formats:
+        for f in reversed(formats):
+            s = f.get('filesize') or f.get('filesize_approx')
+            if s:
+                video_best = s
+                break
+    if not video_best and duration and info.get('tbr'):
+        video_best = int(info['tbr'] * 1000 / 8 * duration)
+
+    return {
+        'resolutions': res_sizes,
+        'audio_size': mp3_size,
+        'voice_size': voice_size,
+        'video_best': video_best
+    }
+
 async def get_video_info(url: str) -> Dict[str, Any]:
-    """Asynchronously fetches metadata for a video URL."""
+    """Asynchronously fetches metadata for a video URL and estimates format sizes."""
     try:
         info = await asyncio.to_thread(_extract_info_sync, url)
         
@@ -164,10 +260,12 @@ async def get_video_info(url: str) -> Dict[str, Any]:
         formats = info.get('formats', [])
         available_heights = set()
         for f in formats:
-            h = f.get('height')
+            h = f.get('height') or 0
+            w = f.get('width') or 0
             vcodec = f.get('vcodec')
-            if h and vcodec and vcodec != 'none':
-                available_heights.add(int(h))
+            dim = min(h, w) if (h and w) else (h or w)
+            if dim and vcodec and vcodec != 'none':
+                available_heights.add(int(dim))
                 
         # Filter supported qualities
         resolutions: List[int] = []
@@ -176,10 +274,13 @@ async def get_video_info(url: str) -> Dict[str, Any]:
                 if any(h >= q for h in available_heights):
                     resolutions.append(q)
             if not resolutions and available_heights:
-                best_h = min(max(available_heights), 1080)
+                best_h = min(max(available_heights), 2160)
                 resolutions.append(best_h)
         else:
             resolutions = []
+
+        # Estimate sizes
+        estimated_sizes = estimate_format_sizes(info, resolutions)
             
         return {
             'success': True,
@@ -190,6 +291,7 @@ async def get_video_info(url: str) -> Dict[str, Any]:
             'extractor': extractor,
             'is_live': is_live,
             'resolutions': resolutions,
+            'estimated_sizes': estimated_sizes,
             'raw_info': info
         }
     except Exception as e:

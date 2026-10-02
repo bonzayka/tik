@@ -24,8 +24,8 @@ DEFAULT_MAX_MB = "2000" if HAS_MTPROTO else "50"
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", DEFAULT_MAX_MB))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# Quality options to display for YouTube
-SUPPORTED_QUALITIES = [1080, 720, 480, 360]
+# Quality options to display for YouTube (2160p = 4K, 1440p = 2K, 1080p = FHD, etc.)
+SUPPORTED_QUALITIES = [2160, 1440, 1080, 720, 480, 360]
 
 # Task cache expiration (seconds)
 TASK_TTL_SECONDS = 3600
