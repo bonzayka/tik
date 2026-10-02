@@ -19,7 +19,7 @@ def create_download_keyboard(
     voice_size = (estimated_sizes or {}).get("voice_size")
     video_best_size = (estimated_sizes or {}).get("video_best")
 
-    if is_youtube and resolutions:
+    if resolutions:
         quality_row: List[InlineKeyboardButton] = []
         for res in resolutions:
             # Build clean label with badge
@@ -59,8 +59,8 @@ def create_download_keyboard(
         if quality_row:
             keyboard.append(quality_row)
     else:
-        # TikTok or platform without multiple resolutions
-        label = "🎬 Скачать видео (HD)"
+        # TikTok, Instagram, Pinterest, Twitter, Reddit, etc.
+        label = "🎬 Скачать (HD / Оригинал)"
         if video_best_size:
             label += f" • ~{format_size(video_best_size)}"
 

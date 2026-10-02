@@ -272,9 +272,10 @@ async def get_video_info(url: str) -> Dict[str, Any]:
             if dim and vcodec and vcodec != 'none':
                 available_heights.add(int(dim))
                 
-        # Filter supported qualities
+        # Filter supported qualities (YouTube and VK support multiple resolutions)
         resolutions: List[int] = []
-        if 'youtube' in extractor:
+        is_multi_quality = any(p in extractor for p in ['youtube', 'vk'])
+        if is_multi_quality:
             for q in SUPPORTED_QUALITIES:
                 if any(h >= q for h in available_heights):
                     resolutions.append(q)
@@ -307,7 +308,7 @@ async def get_video_info(url: str) -> Dict[str, Any]:
         }
 
 def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None) -> Dict[str, Any]:
-    """Synchronous video download."""
+    """Synchronous media download (supports video, photo, and multi-file carousels)."""
     if height:
         format_selector = (
             f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/"
@@ -316,9 +317,9 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
             f"best"
         )
     else:
-        format_selector = "bv*+ba/best"
+        format_selector = "bestvideo+bestaudio/best"
 
-    out_template = str(task_dir / "video_%(id)s.%(ext)s")
+    out_template = str(task_dir / "%(id)s_%(autonumber)s.%(ext)s")
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'format': format_selector,
@@ -328,30 +329,48 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
 
     info = _run_ydl_with_retry(ydl_opts, url, download=True)
     if 'entries' in info and info['entries']:
-        info = info['entries'][0]
-            
-    # Find downloaded file
-    mp4_files = list(task_dir.glob("*.mp4"))
-    if not mp4_files:
-        video_files = [f for f in task_dir.glob("*") if f.is_file() and not f.name.endswith('.part')]
-        if not video_files:
-            raise FileNotFoundError("Downloaded video file not found")
-        target_file = video_files[0]
+        info_first = info['entries'][0]
     else:
-        target_file = mp4_files[0]
+        info_first = info
+
+    # Find all downloaded media files (excluding partial/temp files)
+    all_files = [
+        f for f in task_dir.glob("*")
+        if f.is_file() and not f.name.endswith('.part') and not f.name.endswith('.ytdl')
+    ]
+    if not all_files:
+        raise FileNotFoundError("Downloaded media file not found")
+
+    image_exts = {'.jpg', '.jpeg', '.png', '.webp'}
+    video_exts = {'.mp4', '.mov', '.webm', '.mkv'}
+
+    images = [f for f in all_files if f.suffix.lower() in image_exts]
+    videos = [f for f in all_files if f.suffix.lower() in video_exts]
+
+    if len(all_files) > 1:
+        media_type = 'carousel'
+        target_file = all_files[0]
+    elif len(images) == 1 and not videos:
+        media_type = 'photo'
+        target_file = images[0]
+    else:
+        media_type = 'video'
+        target_file = videos[0] if videos else all_files[0]
 
     filesize = target_file.stat().st_size
-    duration = info.get('duration', 0)
-    width = info.get('width', 0)
-    video_height = info.get('height', 0)
+    duration = info_first.get('duration', 0)
+    width = info_first.get('width', 0)
+    video_height = info_first.get('height', 0)
 
     return {
+        'media_type': media_type,
         'filepath': str(target_file),
+        'files': [str(f) for f in all_files],
         'filesize': filesize,
         'duration': duration,
         'width': width,
         'height': video_height,
-        'title': info.get('title', 'Video')
+        'title': info_first.get('title', 'Media')
     }
 
 async def download_video(url: str, height: Optional[int] = None) -> Tuple[Dict[str, Any], Path]:

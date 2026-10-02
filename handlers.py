@@ -52,19 +52,22 @@ STANDARD_LIMIT = 50 * 1024 * 1024  # Standard Telegram Bot API upload limit
 async def cmd_start(message: Message):
     """Handles /start command with a welcome message."""
     text = (
-        "👋 <b>Привет! Я бот для скачивания видео и аудио в высоком качестве.</b>\n\n"
-        "🚀 <b>Мои возможности:</b>\n"
+        "👋 <b>Привет! Я всеядный бот для скачивания видео, фото и аудио в высоком качестве.</b>\n\n"
+        "🌐 <b>Поддерживаемые платформы:</b>\n"
         "• 🎬 <b>YouTube & Shorts</b> — выбор качества от 360p до <b>1080p, 2K и 4K</b>\n"
-        "• 📱 <b>TikTok</b> — скачивание в лучшем качестве без водяного знака\n"
-        "• 🎵 <b>MP3 с обложками</b> — правильные ID3-теги и квадратные обложки (как в Spotify)\n"
-        "• 🎙 <b>Голосовые сообщения (ГС)</b> — преобразование в голосовые Telegram\n"
-        "• ✂️ <b>Нарезка по таймкодам</b> — скачивание конкретного фрагмента видео или аудио\n"
-        "• 📑 <b>Плейлисты YouTube</b> — скачивание треков поштучно или архивом ZIP\n"
-        "• ⚡️ <b>Скоростная отправка</b> — загрузка файлов до 2 ГБ через MTProto\n\n"
+        "• 📱 <b>TikTok</b> — видео в лучшем качестве без водяного знака\n"
+        "• 📸 <b>Instagram</b> — Reels, Stories, фото и карусели\n"
+        "• 🔵 <b>VK Видео & Клипы</b> — видео с выбором разрешения\n"
+        "• 📌 <b>Pinterest</b> — видео-пины и оригиналы картинок\n"
+        "• 🐦 <b>Twitter (X) & Reddit</b> — ролики в максимальном качестве со звуком\n\n"
+        "🚀 <b>Киллер-фичи:</b>\n"
+        "• 🎵 <b>MP3 с обложками</b> — квадратные обложки и правильные ID3-теги (как в Spotify)\n"
+        "• 🎙 <b>Голосовые сообщения (ГС)</b> — в формате голосовых Telegram\n"
+        "• ✂️ <b>Нарезка по таймкодам</b> — скачивание нужного отрезка ролика\n"
+        "• 📑 <b>Плейлисты YouTube</b> — поштучно или единым ZIP-архивом\n"
+        "• ⚡️ <b>Файлы до 2 ГБ</b> — скоростная отправка через MTProto\n\n"
         "💡 <b>Как пользоваться:</b>\n"
-        "Просто отправь ссылку на видео или плейлист!\n"
-        "<i>Подсказка: можно сразу указать таймкод, например:</i>\n"
-        "<code>https://youtu.be/... 01:15-02:40</code>"
+        "Просто отправьте ссылку на видео, фото или плейлист!"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -74,15 +77,17 @@ async def cmd_help(message: Message):
     """Handles /help command."""
     text = (
         "ℹ️ <b>Справка по использованию:</b>\n\n"
-        "1. Отправьте ссылку на видео из <b>YouTube</b>, <b>TikTok</b> или <b>плейлист</b>.\n"
+        "1. Отправьте ссылку из <b>YouTube</b>, <b>TikTok</b>, <b>Instagram</b>, <b>VK</b>, <b>Pinterest</b>, <b>Twitter (X)</b> или <b>Reddit</b>.\n"
         "2. Выберите нужное качество или формат.\n\n"
         "✂️ <b>Нарезка видео/аудио:</b>\n"
-        "• Укажите таймкод вместе с ссылкой: <code>https://youtu.be/... 01:15-02:30</code>\n"
-        "• Или нажмите кнопку <b>«✂️ Нарезать фрагмент»</b> под видео и пришлите отрезок.\n\n"
-        "📑 <b>Плейлисты:</b>\n"
-        "• Отправьте ссылку на плейлист YouTube — бот предложит скачать треки или упаковать их в ZIP архив.\n\n"
+        "• Укажите таймкод вместе с ссылкой: <code>https://... 01:15-02:30</code>\n"
+        "• Или нажмите кнопку <b>«✂️ Нарезать фрагмент»</b> под сообщением с медиа.\n\n"
+        "📑 <b>Плейлисты YouTube:</b>\n"
+        "• Отправьте ссылку на плейлист — бот предложит скачать треки или упаковать в ZIP архив.\n\n"
+        "🔍 <b>Инлайн-режим:</b>\n"
+        "• Напишите <code>@имя_бота &lt;ссылка&gt;</code> в любом чате или переписке.\n\n"
         "⚡️ <b>Лимиты:</b>\n"
-        "Бот поддерживает отправку файлов размером до <b>2000 МБ (2 ГБ)</b>!"
+        "Бот поддерживает отправку файлов до <b>2000 МБ (2 ГБ)</b>!"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -378,6 +383,45 @@ async def handle_download_callback(callback: CallbackQuery):
             video_duration = res.get("duration") or duration
             width = res.get("width")
             video_height = res.get("height")
+            media_type = res.get("media_type", "video")
+            media_files = res.get("files", [filepath])
+
+            # Handle single photo (Instagram Photo, Pinterest Image Pin)
+            if media_type == "photo":
+                await progress_msg.edit_text("📤 <i>Отправляю фотографию...</i>", parse_mode="HTML")
+                photo_caption = f"📸 <b>{html.escape(title)}</b>\n\n👤 {html.escape(uploader)}"
+                await callback.message.reply_photo(
+                    photo=FSInputFile(filepath),
+                    caption=photo_caption,
+                    parse_mode="HTML"
+                )
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+                return
+
+            # Handle carousel (multiple photos/videos, e.g. Instagram Carousel)
+            if media_type == "carousel":
+                await progress_msg.edit_text(f"📤 <i>Отправляю альбом из {len(media_files)} файлов...</i>", parse_mode="HTML")
+                from aiogram.types import InputMediaPhoto, InputMediaVideo
+                group = []
+                image_exts = {'.jpg', '.jpeg', '.png', '.webp'}
+                base_caption = f"📸 <b>{html.escape(title)}</b>\n\n👤 {html.escape(uploader)}"
+                for idx, fpath in enumerate(media_files[:10]):
+                    is_img = Path(fpath).suffix.lower() in image_exts
+                    cap = base_caption if idx == 0 else None
+                    if is_img:
+                        group.append(InputMediaPhoto(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
+                    else:
+                        group.append(InputMediaVideo(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
+                if group:
+                    await callback.message.reply_media_group(media=group)
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+                return
 
             # Apply Trimming if time_range was specified
             if time_range:

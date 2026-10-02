@@ -46,15 +46,27 @@ def detect_platform(url: str, extractor: Optional[str] = None) -> str:
     url_lower = url.lower()
     if "tiktok.com" in url_lower:
         return "📱 TikTok"
-    elif "youtube.com/shorts" in url_lower or "youtu.be" in url_lower and "shorts" in url_lower:
+    elif "youtube.com/shorts" in url_lower or ("youtu.be" in url_lower and "shorts" in url_lower):
         return "⚡ YouTube Shorts"
     elif "youtube.com" in url_lower or "youtu.be" in url_lower:
         return "🎬 YouTube"
-    elif "instagram.com" in url_lower:
+    elif "instagram.com" in url_lower or "instagr.am" in url_lower:
+        if "/reel" in url_lower:
+            return "📸 Instagram Reels"
+        elif "/stories" in url_lower:
+            return "📸 Instagram Stories"
         return "📸 Instagram"
+    elif "vk.com/clip" in url_lower or "/clip" in url_lower:
+        return "🔵 VK Клипы"
     elif "vk.com" in url_lower or "vkvideo.ru" in url_lower:
         return "🔵 VK Видео"
-    
+    elif "pinterest.com" in url_lower or "pin.it" in url_lower:
+        return "📌 Pinterest"
+    elif "twitter.com" in url_lower or "x.com" in url_lower:
+        return "🐦 Twitter (X)"
+    elif "reddit.com" in url_lower or "redd.it" in url_lower:
+        return "🔴 Reddit"
+
     if extractor:
         return f"🌐 {extractor.capitalize()}"
     return "🌐 Видео"
