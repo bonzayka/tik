@@ -206,6 +206,7 @@ class MTProtoUploader:
         duration: int = 0,
         width: int = 0,
         height: int = 0,
+        thumb_path: Optional[str] = None,
         progress_callback: Optional[Callable] = None
     ):
         if not self.is_available:
@@ -235,6 +236,7 @@ class MTProtoUploader:
             entity=chat_id,
             file=file_handle,
             caption=caption,
+            thumb=thumb_path,
             parse_mode="html",
             attributes=attrs,
             supports_streaming=True,
@@ -249,6 +251,7 @@ class MTProtoUploader:
         title: str = "",
         performer: str = "",
         duration: int = 0,
+        thumb_path: Optional[str] = None,
         progress_callback: Optional[Callable] = None
     ):
         if not self.is_available:
@@ -278,6 +281,7 @@ class MTProtoUploader:
             entity=chat_id,
             file=file_handle,
             caption=caption,
+            thumb=thumb_path,
             parse_mode="html",
             attributes=attrs,
             progress_callback=progress_callback if file_handle == filepath else None

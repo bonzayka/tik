@@ -58,3 +58,36 @@ def detect_platform(url: str, extractor: Optional[str] = None) -> str:
     if extractor:
         return f"🌐 {extractor.capitalize()}"
     return "🌐 Видео"
+
+def parse_timecode_str(s: str) -> Optional[int]:
+    """Converts MM:SS, HH:MM:SS, or raw SS into total seconds."""
+    if not s:
+        return None
+    parts = s.strip().split(':')
+    try:
+        if len(parts) == 1:
+            return int(parts[0])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except ValueError:
+        return None
+    return None
+
+def parse_time_range(text: str) -> Optional[tuple[int, int]]:
+    """
+    Finds and parses a time range like '01:15-02:40', '1:20 - 2:30', '10-45' from text.
+    Returns (start_seconds, end_seconds) or None.
+    """
+    if not text:
+        return None
+    pattern = r"(?:^|\s)(\d{1,2}(?::\d{2}){1,2}|\d+)\s*(?:-|–|—|to|\s)\s*(\d{1,2}(?::\d{2}){1,2}|\d+)(?:\s|$)"
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    start_sec = parse_timecode_str(match.group(1))
+    end_sec = parse_timecode_str(match.group(2))
+    if start_sec is not None and end_sec is not None and end_sec > start_sec:
+        return (start_sec, end_sec)
+    return None

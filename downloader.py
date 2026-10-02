@@ -65,6 +65,11 @@ def is_youtube_url(url: str) -> bool:
     u = url.lower()
     return "youtube.com" in u or "youtu.be" in u
 
+def is_playlist_url(url: str) -> bool:
+    """Checks if the URL is a YouTube playlist."""
+    u = url.lower()
+    return ("youtube.com" in u or "youtu.be" in u) and ("list=" in u) and ("list=wl" not in u)
+
 def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[str, Any]:
     """Generates optimal yt-dlp options tailored to the specific platform."""
     opts: Dict[str, Any] = {
@@ -363,12 +368,13 @@ async def download_video(url: str, height: Optional[int] = None) -> Tuple[Dict[s
         raise
 
 def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
-    """Synchronous audio download as MP3."""
+    """Synchronous audio download as MP3 with embedded cover art and ID3 metadata."""
     out_template = str(task_dir / "audio_%(id)s.%(ext)s")
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'format': 'bestaudio/best',
         'outtmpl': out_template,
+        'writethumbnail': True,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -385,6 +391,56 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         raise FileNotFoundError("Downloaded MP3 file not found")
     
     target_file = mp3_files[0]
+    title = info.get('title', 'Audio')
+    artist = info.get('uploader') or info.get('channel') or info.get('creator') or 'Audio'
+    thumbnail_url = info.get('thumbnail')
+
+    # Prepare 1:1 square cover art for Spotify/Apple Music look
+    cover_file = task_dir / "cover.jpg"
+    raw_images = [
+        f for f in task_dir.glob("*") 
+        if f.suffix.lower() in [".jpg", ".jpeg", ".webp", ".png"] and f != cover_file
+    ]
+
+    input_img = str(raw_images[0]) if raw_images else (thumbnail_url if thumbnail_url else None)
+    if input_img:
+        try:
+            cmd_crop = [
+                'ffmpeg', '-y',
+                '-i', input_img,
+                '-vf', 'crop=min(iw\\,ih):min(iw\\,ih),scale=500:500',
+                str(cover_file)
+            ]
+            subprocess.run(cmd_crop, capture_output=True, timeout=15)
+        except Exception as e:
+            logger.warning(f"Could not crop album cover: {e}")
+
+    # Embed cover and ID3v2 tags into MP3
+    if cover_file.exists() and cover_file.stat().st_size > 0:
+        tagged_file = task_dir / f"tagged_{target_file.name}"
+        try:
+            cmd_tag = [
+                'ffmpeg', '-y',
+                '-i', str(target_file),
+                '-i', str(cover_file),
+                '-map', '0:0',
+                '-map', '1:0',
+                '-c', 'copy',
+                '-id3v2_version', '3',
+                '-metadata', f'title={title}',
+                '-metadata', f'artist={artist}',
+                '-metadata', f'album={title}',
+                '-metadata:s:v', 'title=Album cover',
+                '-metadata:s:v', 'comment=Cover (front)',
+                str(tagged_file)
+            ]
+            res = subprocess.run(cmd_tag, capture_output=True, timeout=20)
+            if res.returncode == 0 and tagged_file.exists() and tagged_file.stat().st_size > 0:
+                target_file.unlink(missing_ok=True)
+                target_file = tagged_file
+        except Exception as e:
+            logger.warning(f"Failed to embed ID3 tags: {e}")
+
     filesize = target_file.stat().st_size
     duration = info.get('duration', 0)
 
@@ -392,8 +448,9 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         'filepath': str(target_file),
         'filesize': filesize,
         'duration': duration,
-        'title': info.get('title', 'Audio'),
-        'uploader': info.get('uploader') or info.get('channel') or 'Audio'
+        'title': title,
+        'uploader': artist,
+        'thumb_path': str(cover_file) if cover_file.exists() else None
     }
 
 async def download_audio(url: str) -> Tuple[Dict[str, Any], Path]:
@@ -484,6 +541,140 @@ async def download_voice(url: str) -> Tuple[Dict[str, Any], Path]:
     try:
         result = await asyncio.to_thread(_download_voice_sync, url, task_dir)
         return result, task_dir
+    except Exception:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise
+
+def trim_media(
+    input_path: str,
+    output_path: str,
+    start_sec: int,
+    end_sec: int,
+    is_video: bool = True
+) -> bool:
+    """Cuts a media file between start_sec and end_sec using ffmpeg."""
+    duration = max(1, end_sec - start_sec)
+    if is_video:
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start_sec),
+            '-i', input_path,
+            '-t', str(duration),
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '22',
+            '-c:a', 'aac',
+            output_path
+        ]
+    else:
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start_sec),
+            '-i', input_path,
+            '-t', str(duration),
+            '-c', 'copy',
+            output_path
+        ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=120)
+        return res.returncode == 0 and Path(output_path).exists() and Path(output_path).stat().st_size > 0
+    except Exception as e:
+        logger.error(f"Error trimming media: {e}")
+        return False
+
+def _get_playlist_info_sync(url: str) -> Dict[str, Any]:
+    """Extracts playlist metadata without downloading media."""
+    ydl_opts = {
+        **get_ydl_opts_for_url(url),
+        'extract_flat': 'in_playlist',
+        'playlistend': 30,
+    }
+    info = _run_ydl_with_retry(ydl_opts, url, download=False)
+    entries = info.get('entries') or []
+    clean_entries = []
+    for e in entries:
+        if not e:
+            continue
+        v_id = e.get('id')
+        v_url = e.get('url')
+        if not v_url or not v_url.startswith('http'):
+            v_url = f"https://www.youtube.com/watch?v={v_id}"
+        clean_entries.append({
+            'id': v_id,
+            'title': e.get('title', 'Без названия'),
+            'url': v_url,
+            'duration': e.get('duration', 0),
+            'uploader': e.get('uploader') or e.get('channel') or ''
+        })
+    return {
+        'is_playlist': True,
+        'title': info.get('title', 'Плейлист YouTube'),
+        'uploader': info.get('uploader') or info.get('channel') or 'YouTube',
+        'count': len(clean_entries),
+        'entries': clean_entries
+    }
+
+async def get_playlist_info(url: str) -> Dict[str, Any]:
+    """Asynchronously fetches playlist metadata."""
+    return await asyncio.to_thread(_get_playlist_info_sync, url)
+
+def _download_playlist_mp3_sync(
+    entries: List[Dict[str, Any]],
+    task_dir: Path,
+    as_zip: bool = False,
+    playlist_title: str = "Playlist"
+) -> Dict[str, Any]:
+    """Downloads tracks from a playlist as MP3, optionally packaging them into a ZIP archive."""
+    import zipfile
+    downloaded_files = []
+
+    for i, entry in enumerate(entries, start=1):
+        v_url = entry['url']
+        track_dir = task_dir / f"track_{i}"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            res = _download_audio_sync(v_url, track_dir)
+            downloaded_files.append(res)
+        except Exception as e:
+            logger.warning(f"Failed to download playlist item {v_url}: {e}")
+
+    if not downloaded_files:
+        raise RuntimeError("Не удалось скачать ни один трек из плейлиста")
+
+    if as_zip:
+        safe_title = "".join(c for c in playlist_title if c.isalnum() or c in " -_").strip() or "Playlist"
+        zip_path = task_dir / f"{safe_title}.zip"
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+            for item in downloaded_files:
+                fpath = Path(item['filepath'])
+                if fpath.exists():
+                    zipf.write(fpath, arcname=fpath.name)
+        return {
+            'is_zip': True,
+            'filepath': str(zip_path),
+            'filesize': zip_path.stat().st_size,
+            'count': len(downloaded_files),
+            'title': safe_title
+        }
+    else:
+        return {
+            'is_zip': False,
+            'tracks': downloaded_files,
+            'count': len(downloaded_files)
+        }
+
+async def download_playlist_mp3(
+    entries: List[Dict[str, Any]],
+    as_zip: bool = False,
+    playlist_title: str = "Playlist"
+) -> Tuple[Dict[str, Any], Path]:
+    """Downloads playlist tracks as MP3 or ZIP."""
+    task_id = str(uuid.uuid4())
+    task_dir = DOWNLOADS_DIR / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        res = await asyncio.to_thread(_download_playlist_mp3_sync, entries, task_dir, as_zip, playlist_title)
+        return res, task_dir
     except Exception:
         shutil.rmtree(task_dir, ignore_errors=True)
         raise

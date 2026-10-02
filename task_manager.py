@@ -21,6 +21,18 @@ class TaskManager:
         """Retrieves task data by ID."""
         return self._tasks.get(task_id)
 
+    def get_latest_task_for_chat(self, chat_id: int) -> Optional[tuple[str, Dict[str, Any]]]:
+        """Finds the most recent task created for a specific chat."""
+        matching = [
+            (k, v) for k, v in self._tasks.items()
+            if v.get('chat_id') == chat_id
+        ]
+        if not matching:
+            return None
+        # Sort by created_at descending
+        matching.sort(key=lambda item: item[1].get('created_at', 0), reverse=True)
+        return matching[0]
+
     def remove_task(self, task_id: str):
         """Removes task data."""
         self._tasks.pop(task_id, None)

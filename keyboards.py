@@ -8,7 +8,8 @@ def create_download_keyboard(
     task_id: str,
     resolutions: Optional[List[int]] = None,
     is_youtube: bool = False,
-    estimated_sizes: Optional[Dict[str, Any]] = None
+    estimated_sizes: Optional[Dict[str, Any]] = None,
+    has_time_range: bool = False
 ) -> InlineKeyboardMarkup:
     """Builds an inline keyboard with quality and format options, displaying estimated file sizes."""
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -90,6 +91,15 @@ def create_download_keyboard(
         )
     ])
 
+    # Trimming option (if not already trimmed)
+    if not has_time_range:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="✂️ Нарезать фрагмент (таймкод)",
+                callback_data=f"dl:{task_id}:trim"
+            )
+        ])
+
     # Cancel button
     keyboard.append([
         InlineKeyboardButton(
@@ -99,3 +109,45 @@ def create_download_keyboard(
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def create_playlist_keyboard(task_id: str, count: int) -> InlineKeyboardMarkup:
+    """Builds an inline keyboard for YouTube Playlists."""
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="🎵 Первые 5 треков (MP3)",
+                callback_data=f"pl:{task_id}:mp3:5"
+            ),
+            InlineKeyboardButton(
+                text=f"🎵 Первые {min(10, count)} (MP3)",
+                callback_data=f"pl:{task_id}:mp3:10"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📦 Скачать архивом ZIP (MP3)",
+                callback_data=f"pl:{task_id}:zip:10"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎬 Скачать первое видео",
+                callback_data=f"pl:{task_id}:v1"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"pl:{task_id}:cancel"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def create_trim_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    """Keyboard shown when prompting user for timecode."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена нарезки", callback_data=f"dl:{task_id}:cancel_trim")]
+    ])

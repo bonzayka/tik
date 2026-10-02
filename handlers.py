@@ -1,10 +1,20 @@
 import html
 import logging
 from pathlib import Path
+from typing import Optional
+
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    FSInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
+
 from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, HAS_MTPROTO
 from mtproto_uploader import uploader as mtproto_uploader, UploadProgressTracker
 from downloader import (
@@ -12,58 +22,141 @@ from downloader import (
     download_video,
     download_audio,
     download_voice,
-    cleanup_task_dir
+    cleanup_task_dir,
+    trim_media,
+    is_playlist_url,
+    get_playlist_info,
+    download_playlist_mp3
 )
-from keyboards import create_download_keyboard
+from keyboards import (
+    create_download_keyboard,
+    create_playlist_keyboard,
+    create_trim_keyboard
+)
 from task_manager import task_manager
-from utils import find_first_url, format_duration, format_size, detect_platform
+from utils import (
+    find_first_url,
+    format_duration,
+    format_size,
+    detect_platform,
+    parse_time_range
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 STANDARD_LIMIT = 50 * 1024 * 1024  # Standard Telegram Bot API upload limit
 
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Handles /start command with a welcome message."""
     text = (
-        "👋 <b>Привет! Я бот для скачивания видео и аудио.</b>\n\n"
+        "👋 <b>Привет! Я бот для скачивания видео и аудио в высоком качестве.</b>\n\n"
         "🚀 <b>Мои возможности:</b>\n"
-        "• 🎬 <b>YouTube & Shorts</b> — выбор качества (1080p, 720p, 480p, 360p)\n"
+        "• 🎬 <b>YouTube & Shorts</b> — выбор качества от 360p до <b>1080p, 2K и 4K</b>\n"
         "• 📱 <b>TikTok</b> — скачивание в лучшем качестве без водяного знака\n"
-        "• 🎵 <b>Извлечение аудио</b> — конвертация любого видео в MP3\n"
-        "• 🎙 <b>Голосовое сообщение (ГС)</b> — преобразование в настоящее голосовое Telegram с визуальной дорожкой\n\n"
+        "• 🎵 <b>MP3 с обложками</b> — правильные ID3-теги и квадратные обложки (как в Spotify)\n"
+        "• 🎙 <b>Голосовые сообщения (ГС)</b> — преобразование в голосовые Telegram\n"
+        "• ✂️ <b>Нарезка по таймкодам</b> — скачивание конкретного фрагмента видео или аудио\n"
+        "• 📑 <b>Плейлисты YouTube</b> — скачивание треков поштучно или архивом ZIP\n"
+        "• ⚡️ <b>Скоростная отправка</b> — загрузка файлов до 2 ГБ через MTProto\n\n"
         "💡 <b>Как пользоваться:</b>\n"
-        "Просто отправь мне ссылку на видео из <b>YouTube</b> или <b>TikTok</b>!"
+        "Просто отправь ссылку на видео или плейлист!\n"
+        "<i>Подсказка: можно сразу указать таймкод, например:</i>\n"
+        "<code>https://youtu.be/... 01:15-02:40</code>"
     )
     await message.answer(text, parse_mode="HTML")
+
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Handles /help command."""
     text = (
         "ℹ️ <b>Справка по использованию:</b>\n\n"
-        "1. Скопируй ссылку на видео из YouTube или TikTok.\n"
-        "2. Отправь её сюда сообщением.\n"
-        "3. Бот покажет превью ролика и кнопки с выбором:\n"
-        "   — Разрешение видео (1080p / 720p / 480p / 360p)\n"
-        "   — Аудио в формате MP3\n"
-        "   — Голосовое сообщение (ГС)\n\n"
-        "⚠️ <i>Примечание: Лимит Telegram на загрузку файлов ботом составляет 50 МБ. "
-        "Для длинных видео в 1080p рекомендуется выбирать 720p/480p или MP3.</i>"
+        "1. Отправьте ссылку на видео из <b>YouTube</b>, <b>TikTok</b> или <b>плейлист</b>.\n"
+        "2. Выберите нужное качество или формат.\n\n"
+        "✂️ <b>Нарезка видео/аудио:</b>\n"
+        "• Укажите таймкод вместе с ссылкой: <code>https://youtu.be/... 01:15-02:30</code>\n"
+        "• Или нажмите кнопку <b>«✂️ Нарезать фрагмент»</b> под видео и пришлите отрезок.\n\n"
+        "📑 <b>Плейлисты:</b>\n"
+        "• Отправьте ссылку на плейлист YouTube — бот предложит скачать треки или упаковать их в ZIP архив.\n\n"
+        "⚡️ <b>Лимиты:</b>\n"
+        "Бот поддерживает отправку файлов размером до <b>2000 МБ (2 ГБ)</b>!"
     )
     await message.answer(text, parse_mode="HTML")
 
+
 @router.message(F.text)
 async def handle_url_message(message: Message):
-    """Detects URLs in text and displays download options."""
-    url = find_first_url(message.text)
+    """Detects URLs, playlists, and timecodes in text and displays options."""
+    text = message.text.strip()
+    url = find_first_url(text)
+    time_range = parse_time_range(text)
+
+    # If message has no URL but contains timecode: apply to recent task for this chat
+    if not url and time_range:
+        latest = task_manager.get_latest_task_for_chat(message.chat.id)
+        if latest:
+            t_id, t_data = latest
+            t_data["time_range"] = time_range
+            s_sec, e_sec = time_range
+            frag_str = f"{format_duration(s_sec)} — {format_duration(e_sec)} ({format_duration(e_sec - s_sec)})"
+
+            kb = create_download_keyboard(
+                task_id=t_id,
+                resolutions=t_data.get("resolutions", []),
+                is_youtube=t_data.get("is_youtube", False),
+                estimated_sizes=t_data.get("estimated_sizes"),
+                has_time_range=True
+            )
+            await message.reply(
+                f"✂️ <b>Фрагмент выбран:</b> <code>{frag_str}</code>\n\n"
+                f"📌 <b>{html.escape(t_data.get('title', ''))}</b>\n\n"
+                f"👇 <i>Выберите, в каком формате скачать фрагмент:</i>",
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+            return
+
     if not url:
         await message.reply(
-            "❌ Ссылка не найдена.\nПожалуйста, отправьте ссылку на видео из <b>YouTube</b> или <b>TikTok</b>.",
+            "❌ Ссылка не найдена.\nПожалуйста, отправьте ссылку на видео из <b>YouTube</b>, <b>TikTok</b> или <b>плейлист</b>.",
             parse_mode="HTML"
         )
         return
+
+    # Check if URL is a YouTube Playlist
+    if is_playlist_url(url):
+        status_msg = await message.reply("🔎 <i>Получаю информацию о плейлисте...</i>", parse_mode="HTML")
+        try:
+            pl_info = await get_playlist_info(url)
+            if pl_info.get("entries"):
+                pl_task_id = task_manager.create_task({
+                    "type": "playlist",
+                    "url": url,
+                    "title": pl_info["title"],
+                    "uploader": pl_info["uploader"],
+                    "count": pl_info["count"],
+                    "entries": pl_info["entries"],
+                    "chat_id": message.chat.id
+                })
+                keyboard = create_playlist_keyboard(pl_task_id, pl_info["count"])
+                caption = (
+                    f"📑 <b>YouTube Плейлист</b>\n"
+                    f"📌 <b>{html.escape(pl_info['title'])}</b>\n\n"
+                    f"👤 <b>Автор:</b> {html.escape(pl_info['uploader'])}\n"
+                    f"🔢 <b>Всего треков/видео:</b> {pl_info['count']}\n\n"
+                    f"👇 <i>Выберите вариант скачивания:</i>"
+                )
+                await status_msg.edit_text(caption, reply_markup=keyboard, parse_mode="HTML")
+                return
+        except Exception as e:
+            logger.warning(f"Playlist extraction failed, falling back to single video: {e}")
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
     status_msg = await message.reply("🔎 <i>Получаю информацию о видео...</i>", parse_mode="HTML")
 
@@ -97,7 +190,6 @@ async def handle_url_message(message: Message):
         )
         return
 
-    # Extract fields
     title = info.get("title", "Без названия")
     uploader = info.get("uploader", "Неизвестный автор")
     duration = info.get("duration", 0)
@@ -108,24 +200,27 @@ async def handle_url_message(message: Message):
     platform_name = detect_platform(url, extractor)
     is_youtube = "youtube" in extractor
 
-    # Save to task manager
     task_id = task_manager.create_task({
         "url": url,
         "title": title,
         "uploader": uploader,
         "duration": duration,
         "extractor": extractor,
-        "chat_id": message.chat.id
+        "chat_id": message.chat.id,
+        "resolutions": resolutions,
+        "estimated_sizes": estimated_sizes,
+        "is_youtube": is_youtube,
+        "time_range": time_range
     })
 
     keyboard = create_download_keyboard(
         task_id=task_id,
         resolutions=resolutions,
         is_youtube=is_youtube,
-        estimated_sizes=estimated_sizes
+        estimated_sizes=estimated_sizes,
+        has_time_range=bool(time_range)
     )
 
-    # Format optional size breakdown in description
     size_lines = []
     res_sizes = (estimated_sizes or {}).get("resolutions", {})
     if is_youtube and resolutions:
@@ -143,11 +238,17 @@ async def handle_url_message(message: Message):
     if size_lines:
         sizes_text = "\n📊 <b>Примерный вес:</b>\n" + "\n".join(size_lines) + "\n"
 
+    trim_info = ""
+    if time_range:
+        s_sec, e_sec = time_range
+        trim_info = f"\n✂️ <b>Выбран фрагмент:</b> <code>{format_duration(s_sec)} — {format_duration(e_sec)}</code>\n"
+
     caption_text = (
         f"{platform_name}\n"
         f"📌 <b>{html.escape(title)}</b>\n\n"
         f"👤 <b>Автор:</b> {html.escape(uploader)}\n"
         f"⏱ <b>Длительность:</b> {format_duration(duration)}\n"
+        f"{trim_info}"
         f"{sizes_text}\n"
         f"👇 <i>Выберите, в каком формате скачать:</i>"
     )
@@ -175,6 +276,7 @@ async def handle_url_message(message: Message):
             parse_mode="HTML"
         )
 
+
 @router.callback_query(F.data.startswith("dl:"))
 async def handle_download_callback(callback: CallbackQuery):
     """Handles download buttons from inline keyboard."""
@@ -196,7 +298,30 @@ async def handle_download_callback(callback: CallbackQuery):
             await callback.message.edit_reply_markup(reply_markup=None)
         return
 
-    # Check task existence
+    # Handle Trimming prompt
+    if action_type == "trim":
+        await callback.answer()
+        await callback.message.reply(
+            "✂️ <b>Нарезка видео или аудио</b>\n\n"
+            "Пришлите нужный временной отрезок ответным сообщением (или просто текстом в чат).\n\n"
+            "<b>Примеры форматов:</b>\n"
+            "• <code>01:15-02:40</code> (с 1 мин 15 сек до 2 мин 40 сек)\n"
+            "• <code>00:30-01:00</code>\n"
+            "• <code>45-90</code> (в секундах)\n\n"
+            "<i>После ввода отрезка бот обновит кнопки для скачивания фрагмента!</i>",
+            reply_markup=create_trim_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return
+
+    if action_type == "cancel_trim":
+        await callback.answer("Нарезка отменена")
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
     task = task_manager.get_task(task_id)
     if not task:
         await callback.answer(
@@ -209,12 +334,12 @@ async def handle_download_callback(callback: CallbackQuery):
     title = task["title"]
     uploader = task["uploader"]
     duration = task["duration"]
+    time_range = task.get("time_range")
     chat_id = callback.message.chat.id
     bot = callback.bot
 
     await callback.answer()
 
-    # Progress message
     progress_msg = await callback.message.reply(
         "⏳ <b>Начинаю обработку...</b> Пожалуйста, подождите.",
         parse_mode="HTML"
@@ -254,7 +379,19 @@ async def handle_download_callback(callback: CallbackQuery):
             width = res.get("width")
             video_height = res.get("height")
 
-            # Check Telegram limit
+            # Apply Trimming if time_range was specified
+            if time_range:
+                s_sec, e_sec = time_range
+                await progress_msg.edit_text(
+                    f"✂️ <i>Обрезаю фрагмент ({format_duration(s_sec)} — {format_duration(e_sec)})...</i>",
+                    parse_mode="HTML"
+                )
+                trimmed_file = task_dir / f"trimmed_{Path(filepath).name}"
+                if trim_media(filepath, str(trimmed_file), s_sec, e_sec, is_video=True):
+                    filepath = str(trimmed_file)
+                    filesize = trimmed_file.stat().st_size
+                    video_duration = e_sec - s_sec
+
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
                     f"⚠️ <b>Файл слишком большой для отправки через Telegram!</b>\n\n"
@@ -264,10 +401,12 @@ async def handle_download_callback(callback: CallbackQuery):
                 )
                 return
 
+            trim_tag = f"\n✂️ <i>Фрагмент: {format_duration(time_range[0])} — {format_duration(time_range[1])}</i>" if time_range else ""
             video_caption = (
                 f"🎬 <b>{html.escape(title)}</b>\n\n"
                 f"👤 {html.escape(uploader)}\n"
                 f"⏱ {format_duration(video_duration)} | 📦 {format_size(filesize)}"
+                f"{trim_tag}"
             )
 
             if filesize > STANDARD_LIMIT:
@@ -311,12 +450,15 @@ async def handle_download_callback(callback: CallbackQuery):
                     supports_streaming=True,
                     parse_mode="HTML"
                 )
-                await progress_msg.delete()
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
 
         elif action_type == "audio":
-            # Audio download
+            # Audio download as MP3 with album art and ID3 metadata
             await progress_msg.edit_text(
-                "⏳ <b>Извлекаю аудио в формате MP3...</b>",
+                "⏳ <b>Извлекаю аудио в формате MP3...</b>\n<i>Добавляю обложку и метаданные трека...</i>",
                 parse_mode="HTML"
             )
             await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
@@ -325,6 +467,20 @@ async def handle_download_callback(callback: CallbackQuery):
             filepath = res["filepath"]
             filesize = res["filesize"]
             audio_duration = res.get("duration") or duration
+            thumb_path = res.get("thumb_path")
+
+            # Apply Trimming if time_range was specified
+            if time_range:
+                s_sec, e_sec = time_range
+                await progress_msg.edit_text(
+                    f"✂️ <i>Обрезаю аудио ({format_duration(s_sec)} — {format_duration(e_sec)})...</i>",
+                    parse_mode="HTML"
+                )
+                trimmed_file = task_dir / f"trimmed_{Path(filepath).name}"
+                if trim_media(filepath, str(trimmed_file), s_sec, e_sec, is_video=False):
+                    filepath = str(trimmed_file)
+                    filesize = trimmed_file.stat().st_size
+                    audio_duration = e_sec - s_sec
 
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
@@ -333,7 +489,8 @@ async def handle_download_callback(callback: CallbackQuery):
                 )
                 return
 
-            audio_caption = f"🎵 <b>{html.escape(title)}</b>\n👤 {html.escape(uploader)}"
+            trim_tag = f"\n✂️ <i>Фрагмент: {format_duration(time_range[0])} — {format_duration(time_range[1])}</i>" if time_range else ""
+            audio_caption = f"🎵 <b>{html.escape(title)}</b>\n👤 {html.escape(uploader)}{trim_tag}"
 
             if filesize > STANDARD_LIMIT:
                 if mtproto_uploader.is_available:
@@ -350,6 +507,7 @@ async def handle_download_callback(callback: CallbackQuery):
                         title=title,
                         performer=uploader,
                         duration=int(audio_duration) if audio_duration else 0,
+                        thumb_path=thumb_path,
                         progress_callback=tracker
                     )
                     try:
@@ -368,13 +526,17 @@ async def handle_download_callback(callback: CallbackQuery):
 
                 await callback.message.reply_audio(
                     audio=FSInputFile(filepath),
+                    thumbnail=FSInputFile(thumb_path) if thumb_path and Path(thumb_path).exists() else None,
                     title=title,
                     performer=uploader,
                     duration=int(audio_duration) if audio_duration else None,
                     caption=audio_caption,
                     parse_mode="HTML"
                 )
-                await progress_msg.delete()
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
 
         elif action_type == "voice":
             # Voice note conversion (OGG Opus)
@@ -389,6 +551,19 @@ async def handle_download_callback(callback: CallbackQuery):
             filesize = res["filesize"]
             voice_duration = res.get("duration") or duration
 
+            # Apply Trimming if time_range was specified
+            if time_range:
+                s_sec, e_sec = time_range
+                await progress_msg.edit_text(
+                    f"✂️ <i>Обрезаю голосовое ({format_duration(s_sec)} — {format_duration(e_sec)})...</i>",
+                    parse_mode="HTML"
+                )
+                trimmed_file = task_dir / "trimmed_voice.ogg"
+                if trim_media(filepath, str(trimmed_file), s_sec, e_sec, is_video=False):
+                    filepath = str(trimmed_file)
+                    filesize = trimmed_file.stat().st_size
+                    voice_duration = e_sec - s_sec
+
             if filesize > MAX_FILE_SIZE_BYTES:
                 await progress_msg.edit_text(
                     f"⚠️ <b>Голосовое сообщение превышает {MAX_FILE_SIZE_MB} МБ ({format_size(filesize)}).</b>",
@@ -396,7 +571,8 @@ async def handle_download_callback(callback: CallbackQuery):
                 )
                 return
 
-            voice_caption = f"🎙 <b>{html.escape(title)}</b>"
+            trim_tag = f"\n✂️ <i>Фрагмент: {format_duration(time_range[0])} — {format_duration(time_range[1])}</i>" if time_range else ""
+            voice_caption = f"🎙 <b>{html.escape(title)}</b>{trim_tag}"
 
             if filesize > STANDARD_LIMIT:
                 if mtproto_uploader.is_available:
@@ -433,8 +609,10 @@ async def handle_download_callback(callback: CallbackQuery):
                     caption=voice_caption,
                     parse_mode="HTML"
                 )
-                await progress_msg.delete()
-
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
 
     except Exception as e:
         logger.error(f"Error processing download callback: {e}", exc_info=True)
@@ -457,3 +635,203 @@ async def handle_download_callback(callback: CallbackQuery):
     finally:
         if task_dir:
             cleanup_task_dir(task_dir)
+
+
+@router.callback_query(F.data.startswith("pl:"))
+async def handle_playlist_callback(callback: CallbackQuery):
+    """Handles playlist actions (top 5, top 10, zip archive, first video)."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    task_id = parts[1]
+    action = parts[2]
+    task = task_manager.get_task(task_id)
+
+    if action == "cancel":
+        task_manager.remove_task(task_id)
+        await callback.answer("Отменено")
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
+    if not task:
+        await callback.answer("⚠️ Срок действия плейлиста истёк. Отправьте ссылку заново.", show_alert=True)
+        return
+
+    await callback.answer()
+    entries = task.get("entries", [])
+    playlist_title = task.get("title", "Плейлист")
+    chat_id = callback.message.chat.id
+    bot = callback.bot
+
+    if action == "v1":
+        if not entries:
+            await callback.message.reply("В плейлисте нет видео.")
+            return
+        v1_url = entries[0]["url"]
+        status_msg = await callback.message.reply("⏳ <i>Загружаю первое видео из плейлиста...</i>", parse_mode="HTML")
+        info = await get_video_info(v1_url)
+        if not info.get("success"):
+            await status_msg.edit_text("❌ Не удалось получить видео.")
+            return
+
+        v_task_id = task_manager.create_task({
+            "url": v1_url,
+            "title": info.get("title"),
+            "uploader": info.get("uploader"),
+            "duration": info.get("duration"),
+            "extractor": info.get("extractor"),
+            "chat_id": chat_id,
+            "resolutions": info.get("resolutions", []),
+            "estimated_sizes": info.get("estimated_sizes"),
+            "is_youtube": True
+        })
+        kb = create_download_keyboard(
+            v_task_id,
+            info.get("resolutions", []),
+            is_youtube=True,
+            estimated_sizes=info.get("estimated_sizes")
+        )
+        await status_msg.edit_text(
+            f"🎬 <b>{html.escape(info['title'])}</b>\n\n"
+            f"⏱ <b>Длительность:</b> {format_duration(info.get('duration'))}\n\n"
+            f"👇 <i>Выберите качество:</i>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        return
+
+    if action in ["mp3", "zip"]:
+        count = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 5
+        target_entries = entries[:count]
+        as_zip = (action == "zip")
+
+        label = "ZIP архив" if as_zip else f"{len(target_entries)} треков"
+        progress_msg = await callback.message.reply(
+            f"⏳ <b>Готовлю {label} из плейлиста...</b>\n"
+            f"<i>Каждый трек будет с обложкой и тегами! Это займет некоторое время.</i>",
+            parse_mode="HTML"
+        )
+        task_dir: Optional[Path] = None
+
+        try:
+            res, task_dir = await download_playlist_mp3(target_entries, as_zip=as_zip, playlist_title=playlist_title)
+
+            if as_zip:
+                zip_path = res["filepath"]
+                filesize = res["filesize"]
+                caption = f"📦 <b>{html.escape(playlist_title)}</b>\n🎵 Треков: {res['count']} | 📦 {format_size(filesize)}"
+
+                if filesize > STANDARD_LIMIT and mtproto_uploader.is_available:
+                    tracker = UploadProgressTracker(progress_msg, filesize, "ZIP архива")
+                    await progress_msg.edit_text("📤 <i>Загружаю ZIP архив через MTProto...</i>", parse_mode="HTML")
+                    await mtproto_uploader.send_video(
+                        chat_id=chat_id,
+                        filepath=zip_path,
+                        caption=caption,
+                        progress_callback=tracker
+                    )
+                else:
+                    await callback.message.reply_document(
+                        document=FSInputFile(zip_path),
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+            else:
+                tracks = res["tracks"]
+                await progress_msg.edit_text(f"📤 <i>Отправляю {len(tracks)} аудиозаписей в чат...</i>", parse_mode="HTML")
+
+                for item in tracks:
+                    fpath = item["filepath"]
+                    t_title = item.get("title", "Audio")
+                    t_artist = item.get("uploader", "Artist")
+                    t_dur = item.get("duration", 0)
+                    t_thumb = item.get("thumb_path")
+                    t_size = item.get("filesize", 0)
+
+                    if t_size > STANDARD_LIMIT and mtproto_uploader.is_available:
+                        await mtproto_uploader.send_audio(
+                            chat_id=chat_id,
+                            filepath=fpath,
+                            caption=f"🎵 <b>{html.escape(t_title)}</b>\n👤 {html.escape(t_artist)}",
+                            title=t_title,
+                            performer=t_artist,
+                            duration=int(t_dur) if t_dur else 0,
+                            thumb_path=t_thumb
+                        )
+                    else:
+                        await callback.message.reply_audio(
+                            audio=FSInputFile(fpath),
+                            thumbnail=FSInputFile(t_thumb) if t_thumb and Path(t_thumb).exists() else None,
+                            title=t_title,
+                            performer=t_artist,
+                            duration=int(t_dur) if t_dur else None,
+                            caption=f"🎵 <b>{html.escape(t_title)}</b>",
+                            parse_mode="HTML"
+                        )
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Error downloading playlist: {e}", exc_info=True)
+            await progress_msg.edit_text(
+                f"❌ <b>Произошла ошибка при обработке плейлиста:</b>\n<code>{html.escape(str(e))}</code>",
+                parse_mode="HTML"
+            )
+        finally:
+            if task_dir:
+                cleanup_task_dir(task_dir)
+
+
+@router.inline_query()
+async def handle_inline_query(inline_query: InlineQuery):
+    """Allows using the bot in any chat via inline mode (@bot_name <url>)."""
+    query = inline_query.query.strip()
+    url = find_first_url(query)
+
+    if not url:
+        await inline_query.answer(
+            results=[
+                InlineQueryResultArticle(
+                    id="help",
+                    title="Вставьте ссылку на YouTube или TikTok",
+                    description="Пример: @bot_name https://youtu.be/...",
+                    input_message_content=InputTextMessageContent(
+                        message_text="👋 Отправьте мне ссылку на YouTube или TikTok, чтобы скачать видео или аудио в высоком качестве!"
+                    )
+                )
+            ],
+            cache_time=5,
+            is_personal=True
+        )
+        return
+
+    results = [
+        InlineQueryResultArticle(
+            id="video",
+            title="🎬 Скачать видео",
+            description=f"Отправить ссылку на видео: {url}",
+            input_message_content=InputTextMessageContent(
+                message_text=f"{url}"
+            )
+        ),
+        InlineQueryResultArticle(
+            id="audio",
+            title="🎵 Скачать MP3 Аудио",
+            description=f"Извлечь MP3: {url}",
+            input_message_content=InputTextMessageContent(
+                message_text=f"{url}"
+            )
+        )
+    ]
+    await inline_query.answer(results=results, cache_time=10, is_personal=True)
