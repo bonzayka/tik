@@ -5,3 +5,6 @@ __pycache__/
 *.session
 *.session-journal
 bin/
+.env
+cookies.txt
+cookies.json

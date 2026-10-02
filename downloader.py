@@ -264,10 +264,95 @@ def _download_pinterest_direct(url: str, task_dir: Path) -> Dict[str, Any]:
         'uploader': info.get('uploader', 'Pinterest')
     }
 
+def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[str, Any]:
+    """Generates optimal yt-dlp options tailored to the specific platform."""
+    url_lower = url.lower()
+    is_multi_item = any(p in url_lower for p in ['instagram.com', 'pinterest.com'])
+
+    opts: Dict[str, Any] = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': not is_multi_item,
+        'js_runtimes': {'node': {}, 'deno': {}, 'quickjs': {}},
+        'remote_components': ['ejs:github'],
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
+        }
+    }
+
+    # Pass cookies if available (cookies.txt or cookies.json)
+    ensure_cookies()
+    cookie_path = BASE_DIR / COOKIES_FILE
+    if cookie_path.exists() and cookie_path.stat().st_size > 0:
+        opts['cookiefile'] = str(cookie_path)
+    elif COOKIES_FROM_BROWSER:
+        opts['cookiesfrombrowser'] = (COOKIES_FROM_BROWSER,)
+
+    # YouTube specific configurations
+    if is_youtube_url(url):
+        if not (cookie_path.exists() and cookie_path.stat().st_size > 0) and not COOKIES_FROM_BROWSER:
+            opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            }
+
+    # Proxy support
+    if config.PROXY and (is_youtube_url(url) or 'instagram.com' in url_lower):
+        opts['proxy'] = config.PROXY
+
+    if custom_format:
+        opts['format'] = custom_format
+
+    return opts
+
+def _run_ydl_with_retry(ydl_opts: Dict[str, Any], url: str, download: bool = False) -> Dict[str, Any]:
+    """Executes yt-dlp with automatic fallback across multiple clients and modes."""
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        err = str(e).lower()
+        if is_youtube_url(url) and any(w in err for w in ['bot', 'sign in', 'cookies', 'confirm', 'requested format', 'unavailable', 'reload']):
+            logger.warning(f"YouTube attempt failed ({e}), trying clean android client without cookies...")
+            clean_opts = dict(ydl_opts)
+            clean_opts.pop('cookiefile', None)
+            clean_opts.pop('cookiesfrombrowser', None)
+            clean_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            }
+            try:
+                with yt_dlp.YoutubeDL(clean_opts) as ydl:
+                    return ydl.extract_info(url, download=download)
+            except Exception as e2:
+                logger.warning(f"Android retry also failed ({e2}), trying ios and web_embedded fallback...")
+                ios_opts = dict(clean_opts)
+                ios_opts['extractor_args'] = {
+                    'youtube': {
+                        'player_client': ['ios', 'web_embedded'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
+                with yt_dlp.YoutubeDL(ios_opts) as ydl:
+                    return ydl.extract_info(url, download=download)
+        raise
+
 def _extract_info_sync(url: str) -> Dict[str, Any]:
     """Synchronous info extraction with yt-dlp and fallback logic."""
     url = resolve_short_url_sync(url)
     url = clean_social_url(url)
+
+    # For Pinterest: try direct fetch first (fastest and handles all image/video pins)
+    if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
+        direct = _fetch_pinterest_direct_info(url)
+        if direct:
+            return direct
+
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'extract_flat': False,
