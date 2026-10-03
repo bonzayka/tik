@@ -264,10 +264,306 @@ def _download_pinterest_direct(url: str, task_dir: Path) -> Dict[str, Any]:
         'uploader': info.get('uploader', 'Pinterest')
     }
 
+def get_video_fps(media_target: str) -> Optional[int]:
+    """Extracts video framerate (FPS) using ffprobe from local file or media URL."""
+    if not media_target:
+        return None
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=r_frame_rate,avg_frame_rate',
+            '-of', 'json',
+            str(media_target)
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout:
+            import json
+            data = json.loads(res.stdout)
+            streams = data.get('streams', [])
+            if streams:
+                r_fps_str = streams[0].get('r_frame_rate') or streams[0].get('avg_frame_rate')
+                if r_fps_str and '/' in r_fps_str:
+                    num, den = r_fps_str.split('/')
+                    num_f, den_f = float(num), float(den)
+                    if den_f > 0:
+                        val = round(num_f / den_f)
+                        if val > 0:
+                            return val
+    except Exception as e:
+        logger.debug(f"Error getting video fps for {media_target}: {e}")
+    return None
+
+def _fetch_tiktok_direct_info(url: str) -> Optional[Dict[str, Any]]:
+    """Directly extracts media info for TikTok (videos, 120 FPS edits, and photo slideshows) via TikWM."""
+    import urllib.request
+    import urllib.parse
+    import json
+
+    clean_u = resolve_short_url_sync(url)
+    clean_u = clean_social_url(clean_u)
+
+    try:
+        data_encoded = urllib.parse.urlencode({'url': clean_u, 'hd': 1}).encode()
+        req = urllib.request.Request(
+            'https://www.tikwm.com/api/',
+            data=data_encoded,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            res_json = json.loads(resp.read().decode('utf-8'))
+
+        if res_json.get('code') != 0 or not res_json.get('data'):
+            logger.warning(f"TikWM returned non-zero code: {res_json.get('msg', 'Unknown error')}")
+            return None
+
+        data = res_json['data']
+        post_id = str(data.get('id', 'tiktok_post'))
+        title = data.get('title') or "TikTok Media"
+        author_dict = data.get('author') or {}
+        uploader = author_dict.get('nickname') or author_dict.get('unique_id') or "TikTok Creator"
+        duration = data.get('duration', 0)
+        cover = data.get('cover') or data.get('origin_cover')
+        music_url = data.get('music')
+        images = data.get('images')
+        hdplay = data.get('hdplay')
+        play = data.get('play')
+
+        # 1. Handle Photo Slideshow (картинки / карусель)
+        if images and isinstance(images, list) and len(images) > 0:
+            photo_count = len(images)
+            media_type = 'carousel' if photo_count > 1 else 'photo'
+            formats = []
+            for idx, img_u in enumerate(images):
+                formats.append({
+                    'url': img_u,
+                    'format_id': f'photo_{idx+1}',
+                    'ext': 'jpg',
+                    'vcodec': 'none',
+                    'acodec': 'none',
+                })
+            if music_url:
+                formats.append({
+                    'url': music_url,
+                    'format_id': 'audio',
+                    'ext': 'mp3',
+                    'vcodec': 'none',
+                    'acodec': 'mp3',
+                })
+
+            return {
+                'id': post_id,
+                'title': title,
+                'uploader': uploader,
+                'duration': duration,
+                'thumbnail': images[0] if images else cover,
+                'extractor': 'tiktok',
+                'formats': formats,
+                '_is_slideshow': True,
+                '_photo_count': photo_count,
+                '_images': images,
+                '_music_url': music_url,
+                '_media_type': media_type,
+                'media_type': media_type,
+                'fps': None
+            }
+
+        # 2. Handle Video (including 4K / 120 FPS edits)
+        video_url = hdplay or play
+        if not video_url:
+            return None
+
+        # Probe FPS with ffprobe on direct stream (timeout 4s)
+        fps = get_video_fps(video_url)
+
+        filesize = data.get('size')
+        formats = [{
+            'url': video_url,
+            'format_id': 'direct_hd' if hdplay else 'direct_play',
+            'ext': 'mp4',
+            'filesize': filesize,
+            'fps': fps,
+            'vcodec': 'h264',
+            'acodec': 'aac',
+        }]
+        if music_url:
+            formats.append({
+                'url': music_url,
+                'format_id': 'audio',
+                'ext': 'mp3',
+                'vcodec': 'none',
+                'acodec': 'mp3',
+            })
+
+        return {
+            'id': post_id,
+            'title': title,
+            'uploader': uploader,
+            'duration': duration,
+            'thumbnail': cover or video_url,
+            'extractor': 'tiktok',
+            'formats': formats,
+            '_direct_url': video_url,
+            '_music_url': music_url,
+            '_media_type': 'video',
+            'media_type': 'video',
+            'filesize': filesize,
+            'fps': fps,
+            '_is_slideshow': False,
+            '_photo_count': 0
+        }
+    except Exception as e:
+        logger.debug(f"TikWM direct info extraction failed: {e}")
+        return None
+
+def _download_tiktok_direct(url_or_info: Any, task_dir: Path) -> Optional[Dict[str, Any]]:
+    """Directly downloads TikTok video or photo slideshow with high speed and full quality."""
+    import urllib.request
+
+    if isinstance(url_or_info, dict) and (url_or_info.get('_direct_url') or url_or_info.get('_images')):
+        info = url_or_info
+    else:
+        info = _fetch_tiktok_direct_info(str(url_or_info))
+        if not info:
+            return None
+
+    title = info.get('title', 'TikTok Media')
+    uploader = info.get('uploader', 'TikTok')
+    post_id = info.get('id', 'post')
+
+    # Case 1: Photo Slideshow
+    if info.get('_is_slideshow') and info.get('_images'):
+        images = info['_images']
+        downloaded_files = []
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+
+        for idx, img_url in enumerate(images, start=1):
+            out_file = task_dir / f"image_{idx:02d}.jpg"
+            req = urllib.request.Request(img_url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp, open(out_file, 'wb') as f:
+                    shutil.copyfileobj(resp, f)
+                if out_file.exists() and out_file.stat().st_size > 0:
+                    downloaded_files.append(out_file)
+            except Exception as e_img:
+                logger.warning(f"Failed to download TikTok slide image {idx} ({img_url}): {e_img}")
+
+        if not downloaded_files:
+            raise RuntimeError("Не удалось скачать ни одной картинки из слайдшоу TikTok")
+
+        total_size = sum(f.stat().st_size for f in downloaded_files)
+        media_type = 'carousel' if len(downloaded_files) > 1 else 'photo'
+
+        return {
+            'media_type': media_type,
+            'filepath': str(downloaded_files[0]),
+            'files': [str(f) for f in downloaded_files],
+            'filesize': total_size,
+            'duration': 0,
+            'width': 0,
+            'height': 0,
+            'fps': None,
+            'title': title,
+            'uploader': uploader,
+            'is_slideshow': True,
+            'photo_count': len(downloaded_files),
+            'music_url': info.get('_music_url')
+        }
+
+    # Case 2: Video (including 4K / 120 FPS)
+    direct_url = info.get('_direct_url')
+    if not direct_url:
+        return None
+
+    target_file = task_dir / f"tiktok_{post_id}.mp4"
+    req = urllib.request.Request(
+        direct_url,
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp, open(target_file, 'wb') as f:
+        shutil.copyfileobj(resp, f)
+
+    filesize = target_file.stat().st_size
+    actual_fps = get_video_fps(str(target_file)) or info.get('fps')
+
+    return {
+        'media_type': 'video',
+        'filepath': str(target_file),
+        'files': [str(target_file)],
+        'filesize': filesize,
+        'duration': info.get('duration', 0),
+        'width': info.get('width', 0),
+        'height': info.get('height', 0),
+        'fps': actual_fps,
+        'title': title,
+        'uploader': uploader,
+        'is_slideshow': False,
+        'photo_count': 0
+    }
+
+def _download_tiktok_audio_direct(url: str, task_dir: Path) -> Dict[str, Any]:
+    """Directly downloads TikTok audio as MP3 with tags and cover."""
+    import urllib.request
+    info = _fetch_tiktok_direct_info(url)
+    if not info or not info.get('_music_url'):
+        raise RuntimeError("Не удалось найти аудиодорожку TikTok")
+
+    music_url = info['_music_url']
+    title = info.get('title', 'TikTok Audio')
+    uploader = info.get('uploader', 'TikTok')
+    thumb_url = info.get('thumbnail')
+
+    target_file = task_dir / "tiktok_audio.mp3"
+    req = urllib.request.Request(music_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+    with urllib.request.urlopen(req, timeout=30) as resp, open(target_file, 'wb') as f:
+        shutil.copyfileobj(resp, f)
+
+    cover_file = task_dir / "cover.jpg"
+    if thumb_url:
+        try:
+            req_t = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            with urllib.request.urlopen(req_t, timeout=15) as resp, open(cover_file, 'wb') as f:
+                shutil.copyfileobj(resp, f)
+        except Exception:
+            pass
+
+    # Embed ID3 tags & cover art
+    if cover_file.exists() and cover_file.stat().st_size > 0:
+        tagged_file = task_dir / "tagged_audio.mp3"
+        try:
+            cmd_tag = [
+                'ffmpeg', '-y',
+                '-i', str(target_file),
+                '-i', str(cover_file),
+                '-map', '0:0',
+                '-map', '1:0',
+                '-c', 'copy',
+                '-id3v2_version', '3',
+                '-metadata', f'title={title}',
+                '-metadata', f'artist={uploader}',
+                '-metadata', f'album={title}',
+                str(tagged_file)
+            ]
+            res = subprocess.run(cmd_tag, capture_output=True, timeout=20)
+            if res.returncode == 0 and tagged_file.exists() and tagged_file.stat().st_size > 0:
+                target_file.unlink(missing_ok=True)
+                target_file = tagged_file
+        except Exception as e:
+            logger.warning(f"Failed to embed TikTok ID3 tags: {e}")
+
+    return {
+        'filepath': str(target_file),
+        'filesize': target_file.stat().st_size,
+        'duration': info.get('duration', 0),
+        'title': title,
+        'uploader': uploader,
+        'thumb_path': str(cover_file) if cover_file.exists() else None
+    }
+
 def get_ydl_opts_for_url(url: str, custom_format: Optional[str] = None) -> Dict[str, Any]:
     """Generates optimal yt-dlp options tailored to the specific platform."""
     url_lower = url.lower()
-    is_multi_item = any(p in url_lower for p in ['instagram.com', 'pinterest.com'])
+    is_multi_item = any(p in url_lower for p in ['instagram.com', 'pinterest.com', 'tiktok.com', 'douyin.com'])
 
     opts: Dict[str, Any] = {
         'quiet': True,
@@ -353,6 +649,12 @@ def _extract_info_sync(url: str) -> Dict[str, Any]:
         if direct:
             return direct
 
+    # For TikTok: try direct fetch first (handles 120 FPS, HD watermark-free, and photos/slideshows without IP blocks)
+    if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+        direct = _fetch_tiktok_direct_info(url)
+        if direct:
+            return direct
+
     ydl_opts = {
         **get_ydl_opts_for_url(url),
         'extract_flat': False,
@@ -363,6 +665,10 @@ def _extract_info_sync(url: str) -> Dict[str, Any]:
     except Exception as e:
         if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
             direct = _fetch_pinterest_direct_info(url)
+            if direct:
+                return direct
+        if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+            direct = _fetch_tiktok_direct_info(url)
             if direct:
                 return direct
         raise
@@ -505,6 +811,18 @@ async def get_video_info(url: str) -> Dict[str, Any]:
 
         # Estimate sizes
         estimated_sizes = estimate_format_sizes(info, resolutions)
+
+        fps = info.get('fps')
+        if not fps and formats:
+            fps_candidates = [f.get('fps') for f in formats if f.get('fps') and f.get('fps') > 0]
+            if fps_candidates:
+                fps = max(fps_candidates)
+        if fps:
+            fps = round(fps)
+
+        media_type = info.get('_media_type') or info.get('media_type')
+        is_slideshow = info.get('_is_slideshow', False)
+        photo_count = info.get('_photo_count', 0)
             
         return {
             'success': True,
@@ -516,6 +834,10 @@ async def get_video_info(url: str) -> Dict[str, Any]:
             'is_live': is_live,
             'resolutions': resolutions,
             'estimated_sizes': estimated_sizes,
+            'fps': fps,
+            'media_type': media_type,
+            'is_slideshow': is_slideshow,
+            'photo_count': photo_count,
             'raw_info': info
         }
     except Exception as e:
@@ -529,6 +851,15 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
     """Synchronous media download (supports video, photo, and multi-file carousels)."""
     url = resolve_short_url_sync(url)
     url = clean_social_url(url)
+
+    # For TikTok: try direct download first (handles 120 FPS, HD watermark-free, and photos/slideshows)
+    if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+        try:
+            res_tt = _download_tiktok_direct(url, task_dir)
+            if res_tt:
+                return res_tt
+        except Exception as e_tt:
+            logger.warning(f"TikTok direct download failed ({e_tt}), falling back to yt-dlp...")
 
     if height:
         format_selector = (
@@ -554,6 +885,11 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
         if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
             logger.info(f"yt-dlp Pinterest download failed ({e}), trying direct download...")
             return _download_pinterest_direct(url, task_dir)
+        if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+            logger.info(f"yt-dlp TikTok download failed ({e}), trying direct download fallback...")
+            res_tt = _download_tiktok_direct(url, task_dir)
+            if res_tt:
+                return res_tt
         raise
 
     if 'entries' in info and info['entries']:
@@ -569,6 +905,10 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
     if not all_files:
         if any(p in url.lower() for p in ['pinterest.com', 'pin.it']):
             return _download_pinterest_direct(url, task_dir)
+        if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+            res_tt = _download_tiktok_direct(url, task_dir)
+            if res_tt:
+                return res_tt
         raise FileNotFoundError("Downloaded media file not found")
 
     image_exts = {'.jpg', '.jpeg', '.png', '.webp'}
@@ -591,6 +931,7 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
     duration = info_first.get('duration', 0)
     width = info_first.get('width', 0)
     video_height = info_first.get('height', 0)
+    actual_fps = get_video_fps(str(target_file)) if media_type == 'video' else info_first.get('fps')
 
     return {
         'media_type': media_type,
@@ -600,7 +941,10 @@ def _download_video_sync(url: str, task_dir: Path, height: Optional[int] = None)
         'duration': duration,
         'width': width,
         'height': video_height,
-        'title': info_first.get('title', 'Media')
+        'fps': actual_fps,
+        'title': info_first.get('title', 'Media'),
+        'is_slideshow': media_type in ('carousel', 'photo'),
+        'photo_count': len(images) if images else 0
     }
 
 async def download_video(url: str, height: Optional[int] = None) -> Tuple[Dict[str, Any], Path]:
@@ -631,7 +975,13 @@ def _download_audio_sync(url: str, task_dir: Path) -> Dict[str, Any]:
         }],
     }
 
-    info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    try:
+        info = _run_ydl_with_retry(ydl_opts, url, download=True)
+    except Exception as e:
+        if any(p in url.lower() for p in ['tiktok.com', 'douyin.com']):
+            logger.info(f"yt-dlp TikTok audio download failed ({e}), trying direct audio download...")
+            return _download_tiktok_audio_direct(url, task_dir)
+        raise
     if 'entries' in info and info['entries']:
         info = info['entries'][0]
 

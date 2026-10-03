@@ -326,4 +326,37 @@ class MTProtoUploader:
             progress_callback=progress_callback if file_handle == filepath else None
         )
 
+    async def send_document(
+        self,
+        chat_id: int,
+        filepath: str,
+        caption: str = "",
+        thumb_path: Optional[str] = None,
+        progress_callback: Optional[Callable] = None
+    ):
+        """Sends any file as a document (force_document=True) via MTProto without compression up to 2GB."""
+        if not self.is_available:
+            raise RuntimeError("MTProto Uploader is not available")
+
+        try:
+            file_handle = await fast_upload_file(
+                client=self.client,
+                file_path=filepath,
+                progress_callback=progress_callback,
+                max_workers=6
+            )
+        except Exception as e:
+            logger.warning(f"Fast upload encountered an error: {e}. Falling back to standard send_file.")
+            file_handle = filepath
+
+        return await self.client.send_file(
+            entity=chat_id,
+            file=file_handle,
+            caption=caption,
+            thumb=thumb_path,
+            force_document=True,
+            parse_mode="html",
+            progress_callback=progress_callback if file_handle == filepath else None
+        )
+
 uploader = MTProtoUploader()

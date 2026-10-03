@@ -9,9 +9,13 @@ def create_download_keyboard(
     resolutions: Optional[List[int]] = None,
     is_youtube: bool = False,
     estimated_sizes: Optional[Dict[str, Any]] = None,
-    has_time_range: bool = False
+    has_time_range: bool = False,
+    fps: Optional[int] = None,
+    media_type: Optional[str] = None,
+    photo_count: Optional[int] = None,
+    is_slideshow: bool = False
 ) -> InlineKeyboardMarkup:
-    """Builds an inline keyboard with quality and format options, displaying estimated file sizes."""
+    """Builds an inline keyboard with quality, 120 FPS document, and photo slideshow options."""
     keyboard: List[List[InlineKeyboardButton]] = []
 
     res_sizes = (estimated_sizes or {}).get("resolutions", {})
@@ -19,6 +23,40 @@ def create_download_keyboard(
     voice_size = (estimated_sizes or {}).get("voice_size")
     video_best_size = (estimated_sizes or {}).get("video_best")
 
+    # 1. Handle Photo Slideshow (TikTok photos, carousels)
+    if is_slideshow or (media_type in ('carousel', 'photo') and photo_count and photo_count > 0):
+        cnt_label = f" ({photo_count} шт)" if photo_count else ""
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"📸 Скачать все фото{cnt_label}",
+                callback_data=f"dl:{task_id}:v:best"
+            )
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                text="📁 Скачать архивом ZIP (без сжатия)",
+                callback_data=f"dl:{task_id}:doc"
+            )
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🎵 MP3 музыка",
+                callback_data=f"dl:{task_id}:audio"
+            ),
+            InlineKeyboardButton(
+                text="🎙 ГС",
+                callback_data=f"dl:{task_id}:voice"
+            )
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"dl:{task_id}:cancel"
+            )
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    # 2. Handle YouTube / Multi-resolution videos
     if resolutions:
         quality_row: List[InlineKeyboardButton] = []
         for res in resolutions:
@@ -58,9 +96,21 @@ def create_download_keyboard(
                     quality_row = []
         if quality_row:
             keyboard.append(quality_row)
+
+        # File download button for multi-resolution
+        if fps and fps > 60:
+            doc_label = f"⚡️ 📄 Файлом без сжатия ({fps} FPS / Оригинал)"
+        else:
+            doc_label = "📄 Скачать файлом (без сжатия / 120 FPS)"
+        keyboard.append([
+            InlineKeyboardButton(
+                text=doc_label,
+                callback_data=f"dl:{task_id}:doc"
+            )
+        ])
     else:
         # TikTok, Instagram, Pinterest, Twitter, Reddit, etc.
-        label = "🎬 Скачать (HD / Оригинал)"
+        label = "🎬 Скачать видео (HD / Плеер TG)"
         if video_best_size:
             label += f" • ~{format_size(video_best_size)}"
 
@@ -68,6 +118,19 @@ def create_download_keyboard(
             InlineKeyboardButton(
                 text=label,
                 callback_data=f"dl:{task_id}:v:best"
+            )
+        ])
+
+        # Prominent uncompressed document button for 120 FPS
+        if fps and fps > 60:
+            doc_label = f"⚡️ 📄 Файлом без сжатия ({fps} FPS)"
+        else:
+            doc_label = "📄 Скачать файлом (120 FPS / без сжатия)"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=doc_label,
+                callback_data=f"dl:{task_id}:doc"
             )
         ])
 

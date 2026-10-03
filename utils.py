@@ -23,7 +23,7 @@ def clean_social_url(url: str) -> str:
     # Clean instagram share link: /share/p/ -> /p/, /share/reel/ -> /reel/
     url = re.sub(r'instagram\.com/share/(p|reel|tv)/', r'instagram.com/\1/', url, flags=re.IGNORECASE)
     # Strip tracking parameters for social links
-    if any(d in url.lower() for d in ['instagram.com', 'tiktok.com', 'pinterest.com', 'pin.it', 'twitter.com', 'x.com', 'reddit.com']):
+    if any(d in url.lower() for d in ['instagram.com', 'tiktok.com', 'douyin.com', 'pinterest.com', 'pin.it', 'twitter.com', 'x.com', 'reddit.com']):
         import urllib.parse
         parsed = urllib.parse.urlparse(url)
         if parsed.query:
@@ -36,8 +36,9 @@ def clean_social_url(url: str) -> str:
     return url
 
 def resolve_short_url_sync(url: str) -> str:
-    """Follows HTTP redirects for short URLs like pin.it."""
-    if 'pin.it' in url.lower():
+    """Follows HTTP redirects for short URLs like pin.it, vm.tiktok.com, and vt.tiktok.com."""
+    url_lower = url.lower()
+    if any(p in url_lower for p in ['pin.it', 'vm.tiktok.com', 'vt.tiktok.com']):
         import urllib.request
         try:
             req = urllib.request.Request(
@@ -47,7 +48,7 @@ def resolve_short_url_sync(url: str) -> str:
             opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
             with opener.open(req, timeout=10) as resp:
                 final = resp.geturl()
-                if final and 'pinterest.com' in final:
+                if final:
                     return final
         except Exception:
             pass

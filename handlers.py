@@ -10,7 +10,11 @@ from aiogram.types import (
     FSInputFile,
     InlineQuery,
     InlineQueryResultArticle,
-    InputTextMessageContent
+    InputTextMessageContent,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+    InputMediaVideo
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
@@ -26,7 +30,8 @@ from downloader import (
     trim_media,
     is_playlist_url,
     get_playlist_info,
-    download_playlist_mp3
+    download_playlist_mp3,
+    get_video_fps
 )
 from keyboards import (
     create_download_keyboard,
@@ -57,12 +62,14 @@ async def cmd_start(message: Message):
         "👋 <b>Привет! Я всеядный бот для скачивания видео, фото и аудио в высоком качестве.</b>\n\n"
         "🌐 <b>Поддерживаемые платформы:</b>\n"
         "• 🎬 <b>YouTube & Shorts</b> — выбор качества от 360p до <b>1080p, 2K и 4K</b>\n"
-        "• 📱 <b>TikTok</b> — видео в лучшем качестве без водяного знака\n"
+        "• 📱 <b>TikTok</b> — видео без водяного знака, <b>4K 120 FPS без сжатия</b>, а также <b>фото и слайдшоу</b>\n"
         "• 📸 <b>Instagram</b> — Reels, Stories, фото и карусели\n"
         "• 🔵 <b>VK Видео & Клипы</b> — видео с выбором разрешения\n"
         "• 📌 <b>Pinterest</b> — видео-пины и оригиналы картинок\n"
         "• 🐦 <b>Twitter (X) & Reddit</b> — ролики в максимальном качестве со звуком\n\n"
         "🚀 <b>Киллер-фичи:</b>\n"
+        "• ⚡️ <b>120 FPS без сжатия</b> — отправка файлов документами в оригинальном битрейте и частоте\n"
+        "• 📸 <b>Фото-слайдшоу TikTok</b> — скачивание всех картинок альбомом или ZIP-архивом + музыка\n"
         "• 🎵 <b>MP3 с обложками</b> — квадратные обложки и правильные ID3-теги (как в Spotify)\n"
         "• 🎙 <b>Голосовые сообщения (ГС)</b> — в формате голосовых Telegram\n"
         "• ✂️ <b>Нарезка по таймкодам</b> — скачивание нужного отрезка ролика\n"
@@ -209,6 +216,10 @@ async def handle_url_message(message: Message):
     estimated_sizes = info.get("estimated_sizes", {})
     platform_name = detect_platform(url, extractor)
     is_youtube = "youtube" in extractor
+    fps = info.get("fps")
+    media_type = info.get("media_type")
+    is_slideshow = info.get("is_slideshow", False)
+    photo_count = info.get("photo_count", 0)
 
     task_id = task_manager.create_task({
         "url": url,
@@ -220,7 +231,11 @@ async def handle_url_message(message: Message):
         "resolutions": resolutions,
         "estimated_sizes": estimated_sizes,
         "is_youtube": is_youtube,
-        "time_range": time_range
+        "time_range": time_range,
+        "fps": fps,
+        "media_type": media_type,
+        "is_slideshow": is_slideshow,
+        "photo_count": photo_count
     })
 
     keyboard = create_download_keyboard(
@@ -228,7 +243,11 @@ async def handle_url_message(message: Message):
         resolutions=resolutions,
         is_youtube=is_youtube,
         estimated_sizes=estimated_sizes,
-        has_time_range=bool(time_range)
+        has_time_range=bool(time_range),
+        fps=fps,
+        media_type=media_type,
+        photo_count=photo_count,
+        is_slideshow=is_slideshow
     )
 
     size_lines = []
@@ -253,11 +272,26 @@ async def handle_url_message(message: Message):
         s_sec, e_sec = time_range
         trim_info = f"\n✂️ <b>Выбран фрагмент:</b> <code>{format_duration(s_sec)} — {format_duration(e_sec)}</code>\n"
 
+    fps_line = f"⚡️ <b>Частота кадров:</b> {fps} FPS\n" if fps else ""
+    fps_notice = ""
+    if fps and fps > 60:
+        fps_notice = (
+            f"\n🚀 <b>Обнаружено {fps} FPS!</b>\n"
+            f"<i>В плеере Telegram видео воспроизводится максимум в 60 FPS. "
+            f"Скачивайте <b>файлом без сжатия</b> для максимальной плавности {fps} FPS и 4K!</i>\n"
+        )
+
+    photo_info = f"📸 <b>Картинки:</b> {photo_count} шт.\n" if photo_count else ""
+    dur_line = f"⏱ <b>Длительность:</b> {format_duration(duration)}\n" if duration and not is_slideshow else ""
+
     caption_text = (
         f"{platform_name}\n"
         f"📌 <b>{html.escape(title)}</b>\n\n"
         f"👤 <b>Автор:</b> {html.escape(uploader)}\n"
-        f"⏱ <b>Длительность:</b> {format_duration(duration)}\n"
+        f"{dur_line}"
+        f"{photo_info}"
+        f"{fps_line}"
+        f"{fps_notice}"
         f"{trim_info}"
         f"{sizes_text}\n"
         f"👇 <i>Выберите, в каком формате скачать:</i>"
@@ -414,34 +448,36 @@ async def handle_download_callback(callback: CallbackQuery):
                     pass
                 return
 
-            # Handle carousel (multiple photos/videos, e.g. Instagram Carousel)
+            # Handle carousel (multiple photos/videos, e.g. TikTok slideshow, Instagram Carousel)
             if media_type == "carousel":
                 await progress_msg.edit_text(f"📤 <i>Отправляю альбом из {len(media_files)} файлов...</i>", parse_mode="HTML")
-                from aiogram.types import InputMediaPhoto, InputMediaVideo
-                group = []
                 image_exts = {'.jpg', '.jpeg', '.png', '.webp'}
-                base_caption = f"📸 <b>{html.escape(title)}</b>\n\n👤 {html.escape(uploader)}"
-                for idx, fpath in enumerate(media_files[:10]):
-                    is_img = Path(fpath).suffix.lower() in image_exts
-                    cap = base_caption if idx == 0 else None
-                    if is_img:
-                        group.append(InputMediaPhoto(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
-                    else:
-                        group.append(InputMediaVideo(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
-                if group:
-                    try:
-                        await callback.message.reply_media_group(media=group)
-                    except Exception as e_grp:
-                        logger.warning(f"reply_media_group failed ({e_grp}), sending files individually...")
-                        for fpath in media_files[:10]:
-                            is_img = Path(fpath).suffix.lower() in image_exts
-                            try:
-                                if is_img:
-                                    await callback.message.reply_photo(photo=FSInputFile(fpath))
-                                else:
-                                    await callback.message.reply_video(video=FSInputFile(fpath))
-                            except Exception:
-                                await callback.message.reply_document(document=FSInputFile(fpath))
+                all_chunks = [media_files[i:i + 10] for i in range(0, len(media_files), 10)]
+
+                for c_idx, chunk in enumerate(all_chunks, start=1):
+                    part_label = f" (Часть {c_idx}/{len(all_chunks)})" if len(all_chunks) > 1 else ""
+                    group = []
+                    for idx, fpath in enumerate(chunk):
+                        cap = f"📸 <b>{html.escape(title)}</b>{part_label}\n\n👤 {html.escape(uploader)}" if idx == 0 else None
+                        is_img = Path(fpath).suffix.lower() in image_exts
+                        if is_img:
+                            group.append(InputMediaPhoto(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
+                        else:
+                            group.append(InputMediaVideo(media=FSInputFile(fpath), caption=cap, parse_mode="HTML"))
+                    if group:
+                        try:
+                            await callback.message.reply_media_group(media=group)
+                        except Exception as e_grp:
+                            logger.warning(f"reply_media_group failed ({e_grp}), sending files individually...")
+                            for fpath in chunk:
+                                is_img = Path(fpath).suffix.lower() in image_exts
+                                try:
+                                    if is_img:
+                                        await callback.message.reply_photo(photo=FSInputFile(fpath))
+                                    else:
+                                        await callback.message.reply_video(video=FSInputFile(fpath))
+                                except Exception:
+                                    await callback.message.reply_document(document=FSInputFile(fpath))
                 try:
                     await progress_msg.delete()
                 except Exception:
@@ -470,12 +506,31 @@ async def handle_download_callback(callback: CallbackQuery):
                 )
                 return
 
+            actual_fps = res.get("fps") or get_video_fps(filepath) or task.get("fps")
+            fps_tag = f" | ⚡ {actual_fps} FPS" if actual_fps else ""
             trim_tag = f"\n✂️ <i>Фрагмент: {format_duration(time_range[0])} — {format_duration(time_range[1])}</i>" if time_range else ""
+            
+            fps_alert = ""
+            fps_kb = None
+            if actual_fps and actual_fps > 60:
+                fps_alert = (
+                    f"\n\n⚡️ <b>Обнаружено {actual_fps} FPS!</b>\n"
+                    f"<i>Встроенный плеер Telegram воспроизводит видео максимум в 60 FPS. "
+                    f"Нажмите кнопку ниже, чтобы получить файл без сжатия ({actual_fps} FPS).</i>"
+                )
+                fps_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"⚡️ 📄 Скачать файлом ({actual_fps} FPS без сжатия)",
+                        callback_data=f"dl:{task_id}:doc"
+                    )
+                ]])
+
             video_caption = (
                 f"🎬 <b>{html.escape(title)}</b>\n\n"
                 f"👤 {html.escape(uploader)}\n"
-                f"⏱ {format_duration(video_duration)} | 📦 {format_size(filesize)}"
+                f"⏱ {format_duration(video_duration)} | 📦 {format_size(filesize)}{fps_tag}"
                 f"{trim_tag}"
+                f"{fps_alert}"
             )
 
             if filesize > STANDARD_LIMIT:
@@ -495,6 +550,12 @@ async def handle_download_callback(callback: CallbackQuery):
                         height=video_height if video_height else 0,
                         progress_callback=tracker
                     )
+                    if fps_kb:
+                        await callback.message.reply(
+                            f"💡 <i>Видео выше содержит {actual_fps} FPS. Скачайте файлом для воспроизведения на 120 Гц:</i>",
+                            reply_markup=fps_kb,
+                            parse_mode="HTML"
+                        )
                     try:
                         await progress_msg.delete()
                     except Exception:
@@ -517,6 +578,139 @@ async def handle_download_callback(callback: CallbackQuery):
                     width=width if width else None,
                     height=video_height if video_height else None,
                     supports_streaming=True,
+                    reply_markup=fps_kb,
+                    parse_mode="HTML"
+                )
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+
+        elif action_type == "doc":
+            # Download as Document / File without compression (120 FPS / original / ZIP for slideshows)
+            await progress_msg.edit_text(
+                "⏳ <b>Скачиваю файл в оригинальном качестве без сжатия...</b>\n"
+                "<i>Сохраняю исходную частоту кадров (120 FPS) и битрейт...</i>",
+                parse_mode="HTML"
+            )
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+
+            res, task_dir = await download_video(url)
+            filepath = res["filepath"]
+            filesize = res["filesize"]
+            video_duration = res.get("duration") or duration
+            media_type = res.get("media_type", "video")
+            media_files = res.get("files", [filepath])
+            is_slideshow = res.get("is_slideshow", False) or (media_type in ("carousel", "photo") and len(media_files) > 1)
+
+            # Handle photo slideshow by packaging into a ZIP archive
+            if is_slideshow and len(media_files) > 1:
+                await progress_msg.edit_text(f"📦 <i>Упаковываю {len(media_files)} фото в ZIP архив без сжатия...</i>", parse_mode="HTML")
+                import zipfile
+                zip_path = task_dir / "photos.zip"
+                with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+                    for idx, fpath in enumerate(media_files, start=1):
+                        fp = Path(fpath)
+                        if fp.exists():
+                            zipf.write(fp, arcname=f"photo_{idx:02d}{fp.suffix}")
+                
+                zip_size = zip_path.stat().st_size
+                zip_caption = (
+                    f"📦 <b>{html.escape(title)}</b>\n\n"
+                    f"👤 {html.escape(uploader)}\n"
+                    f"📸 <b>{len(media_files)} фото в архиве ZIP</b> (оригиналы без сжатия)\n"
+                    f"📦 {format_size(zip_size)}"
+                )
+
+                if zip_size > STANDARD_LIMIT:
+                    if mtproto_uploader.is_available:
+                        tracker = UploadProgressTracker(progress_msg, zip_size, "ZIP архива")
+                        await progress_msg.edit_text(f"📤 <i>Загружаю ZIP архив ({format_size(zip_size)}) через MTProto...</i>", parse_mode="HTML")
+                        await mtproto_uploader.send_document(
+                            chat_id=chat_id,
+                            filepath=str(zip_path),
+                            caption=zip_caption,
+                            progress_callback=tracker
+                        )
+                    else:
+                        await progress_msg.edit_text(f"⚠️ Архив превышает 50 МБ ({format_size(zip_size)}).", parse_mode="HTML")
+                        return
+                else:
+                    await progress_msg.edit_text("📤 <i>Отправляю ZIP архив с фотографиями...</i>", parse_mode="HTML")
+                    await callback.message.reply_document(
+                        document=FSInputFile(str(zip_path)),
+                        caption=zip_caption,
+                        parse_mode="HTML"
+                    )
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+                return
+
+            # Apply Trimming if time_range was specified
+            if time_range:
+                s_sec, e_sec = time_range
+                await progress_msg.edit_text(
+                    f"✂️ <i>Обрезаю фрагмент ({format_duration(s_sec)} — {format_duration(e_sec)})...</i>",
+                    parse_mode="HTML"
+                )
+                trimmed_file = task_dir / f"trimmed_{Path(filepath).name}"
+                if trim_media(filepath, str(trimmed_file), s_sec, e_sec, is_video=True):
+                    filepath = str(trimmed_file)
+                    filesize = trimmed_file.stat().st_size
+                    video_duration = e_sec - s_sec
+
+            if filesize > MAX_FILE_SIZE_BYTES:
+                await progress_msg.edit_text(
+                    f"⚠️ <b>Файл превышает {MAX_FILE_SIZE_MB} МБ ({format_size(filesize)}).</b>",
+                    parse_mode="HTML"
+                )
+                return
+
+            actual_fps = res.get("fps") or get_video_fps(filepath) or task.get("fps")
+            fps_tag = f" | ⚡ {actual_fps} FPS" if actual_fps else ""
+            trim_tag = f"\n✂️ <i>Фрагмент: {format_duration(time_range[0])} — {format_duration(time_range[1])}</i>" if time_range else ""
+            doc_caption = (
+                f"📄 <b>{html.escape(title)}</b>\n\n"
+                f"👤 {html.escape(uploader)}\n"
+                f"⏱ {format_duration(video_duration)} | 📦 {format_size(filesize)}{fps_tag}"
+                f"{trim_tag}\n\n"
+                f"⚡️ <i>Файл отправлен без сжатия (сохранено оригинальное качество и {actual_fps or 120} FPS)</i>"
+            )
+
+            if filesize > STANDARD_LIMIT:
+                if mtproto_uploader.is_available:
+                    tracker = UploadProgressTracker(progress_msg, filesize, "документа")
+                    await progress_msg.edit_text(
+                        f"📤 <i>Загружаю файл ({format_size(filesize)}) без сжатия через MTProto (до 2 ГБ)...</i>\n"
+                        f"<i>Включена скоростная параллельная отправка 🚀</i>",
+                        parse_mode="HTML"
+                    )
+                    await mtproto_uploader.send_document(
+                        chat_id=chat_id,
+                        filepath=filepath,
+                        caption=doc_caption,
+                        progress_callback=tracker
+                    )
+                    try:
+                        await progress_msg.delete()
+                    except Exception:
+                        pass
+                else:
+                    await progress_msg.edit_text(
+                        f"⚠️ <b>Файл превышает 50 МБ ({format_size(filesize)}).</b>\n\n"
+                        f"Для загрузки файлов до 2 ГБ проверьте настройки API_ID и API_HASH.",
+                        parse_mode="HTML"
+                    )
+                    return
+            else:
+                await progress_msg.edit_text("📤 <i>Отправляю файл без сжатия в Telegram...</i>", parse_mode="HTML")
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+
+                await callback.message.reply_document(
+                    document=FSInputFile(filepath),
+                    caption=doc_caption,
                     parse_mode="HTML"
                 )
                 try:
