@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bot Token
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7735472569:AAGK8ODEqysN2viV7M92WKXwjw-KtIG-3H8")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7735472569:AAFUibgHA0g737Z_g24n5DqlVailiLo5y4Q")
 
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent
